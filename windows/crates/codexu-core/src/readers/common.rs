@@ -260,6 +260,7 @@ pub fn make_local_usage(summaries: Vec<SessionSummary>, now: DateTime<Utc>) -> O
         recent_threads,
         detailed_usage: Some(detailed),
         usage_trend: Some(usage_trend),
+        inference_performance: None,
         project_board: Some(ProjectBoard {
             recent_projects: project_usages.iter().take(8).cloned().collect(),
             all_projects: project_usages,

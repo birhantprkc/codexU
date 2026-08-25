@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use crate::models::*;
 use crate::readers::{
     build_leadership_snapshot, CodexAppServerQuotaSnapshot, CodexStateReader, CodexTaskBoardReader,
-    CodexThreadMetadata, CodexTranscriptReader,
+    CodexThreadMetadata, CodexTranscriptReader, InferencePerformanceReader,
 };
 
 /// Default leadership period for dashboard visibility.
@@ -110,7 +110,7 @@ impl CodexDashboardProvider {
         let (state_metadata, messages) = self.load_state_metadata().await?;
 
         let transcript_reader = CodexTranscriptReader::new(&self.cache_dir);
-        let local_usage = transcript_reader
+        let mut local_usage = transcript_reader
             .load_local_usage_with_metadata(&self.codex_root, state_metadata.clone(), now)
             .await?;
         let summaries = transcript_reader
@@ -127,6 +127,13 @@ impl CodexDashboardProvider {
             .load(now)
             .await
             .unwrap_or(None);
+
+        if let Some(local) = local_usage.as_mut() {
+            local.inference_performance = InferencePerformanceReader::new(&self.cache_dir)
+                .load(&self.codex_root, now)
+                .await
+                .unwrap_or(None);
+        }
 
         Ok(Some(CodexDashboardSnapshot {
             codex: build_codex_runtime_snapshot(local_usage, task_board, now),

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::InferencePerformanceHistory;
+
 /// Quality label for usage data sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -214,6 +216,8 @@ pub struct LocalUsage {
     pub recent_threads: Vec<LocalThread>,
     pub detailed_usage: Option<DetailedUsage>,
     pub usage_trend: Option<UsageTrend>,
+    #[serde(default)]
+    pub inference_performance: Option<InferencePerformanceHistory>,
     pub project_board: Option<ProjectBoard>,
     pub tool_usages: Vec<ToolUsage>,
     pub skill_usages: Vec<SkillUsage>,

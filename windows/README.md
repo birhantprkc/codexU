@@ -3,9 +3,18 @@
 当前 checkout 已包含 Phase 1/2 的本地数据管线和 Phase 4 Dashboard UI：
 
 - Rust reader 读取本机 Codex transcript、`state_5.sqlite` 和 automation 元数据
-- Tauri IPC、额度状态、用量、任务、项目、Skills 和 AI Leadership Dashboard
+- Tauri IPC、额度状态、用量、推理性能、任务、项目、Skills 和 AI Leadership Dashboard
 - 中英文设置、Light/Dark/System 外观和六套语义 palette catalog
 - Windows 原生 exact-HWND、后台不抢前台的视觉采集 workflow
+
+## Windows Dashboard showcase
+
+![codexU Windows AI Leadership dashboard](../docs/windows-port/showcase/assets/windows-glass-light-default-overview.png)
+
+这是一张当前 Windows Web 实现的 AI Leadership 截图：Light 主题、default palette、
+Playwright viewport `1440×900`。画面只展示聚合指标和领导力界面，不包含任务标题、项目名或本机路径。
+它用于展示当前 Dashboard 的信息层级和玻璃表面，不作为真实 Tauri HWND、DPI、窗口层级或原生透明
+路径的验收证据。
 
 任务快照读取并展示：
 
@@ -16,7 +25,8 @@
 
 ## 快速开始
 
-Windows 工作区使用 MSVC ABI。首次在当前检出目录开发时，安装并设置项目级 toolchain override：
+Windows 工作区使用 Node.js 22.12 或更新版本和 MSVC ABI。首次在当前检出目录开发时，
+安装并设置项目级 toolchain override：
 
 ```powershell
 rustup toolchain install 1.97.1-x86_64-pc-windows-msvc --profile minimal --component rustfmt
@@ -46,6 +56,26 @@ $env:RUST_LOG="info"
 cargo +stable-x86_64-pc-windows-msvc test --workspace
 ```
 
+### Web 验证
+
+默认 Playwright 运行使用仓库内的合成 fixture，因此在没有本机 Codex 历史的干净 runner 上也可复现。
+只有显式设置 `CODEXU_VISUAL_LIVE=1` 时，才以只读方式加载当前机器的本地聚合数据；两种模式的截图和
+manifest 都只写入 Git 忽略的 `.local-artifacts/`。
+
+```powershell
+cd windows\apps\codexu-tauri\web
+npm ci
+npm run build
+npm run test:contracts
+npm run test:visual
+
+# 可选：以本机只读数据复核单个 surface
+$env:CODEXU_VISUAL_LIVE="1"
+$env:CODEXU_VISUAL_SURFACE="inference"
+npm run test:visual
+Remove-Item Env:CODEXU_VISUAL_LIVE, Env:CODEXU_VISUAL_SURFACE
+```
+
 ### 原生视觉验收
 
 Dashboard 的正式 Windows 本机采集入口会构建真实 Tauri release 应用，并执行一次
@@ -55,6 +85,10 @@ Usage 与 Skills 使用动态编号的 panel segments；Projects 仅采集一个
 并从任务栏和 Alt-Tab 排除；正常启动 codexU 的窗口行为不变。
 截图、日志和 WebView2 临时数据只写入
 Git 忽略的 `.local-artifacts/`；当前契约不包含额外的 client sizes。
+
+本轮 Windows V0 的原生视觉矩阵与 shell lifecycle 证据在按 build `26200` 归类的 Windows 11
+环境完成；Windows 10 仍是支持目标，但未在本轮实机观测。该说明只描述本轮验收环境，
+不把当前主机结果扩展为跨 OS 结论。
 
 测试分三层：
 
@@ -110,9 +144,8 @@ windows/
             └── main.rs                    ← CLI 入口
 ```
 
-## 下一阶段（只记录，不实施）
+## 后续开发方向
 
-- 定义 prompt-like session 标题、完整路径和敏感片段的脱敏策略。
-- 对默认蓝紫、一套冷色和一套暖色做 Light/Dark 原生视觉矩阵。
-- 补齐 Settings、空数据、错误状态和长中文标题的原生验收。
-- 单独处理 Windows 安装包、签名、更新器和发布流程。
+1. 优化大型本地历史下的推理性能读取成本，并让日期统计遵循本地时区。
+2. 扩展 Windows 10 与不同 DPI 环境下的原生视觉验证。
+3. 逐项处理布局、数据边界、安装体验和验收证据等其他差异。

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use chrono::Utc;
 use clap::Parser;
-use codexu_core::readers::{ClaudeCodeTranscriptReader, CodexStateReader, CodexTranscriptReader};
+use codexu_core::readers::{
+    ClaudeCodeTranscriptReader, CodexDashboardProvider, CodexStateReader, CodexTranscriptReader,
+};
 use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
@@ -33,6 +35,10 @@ struct Args {
     /// Only print summary, skip writing JSON
     #[arg(long)]
     summary: bool,
+
+    /// Write the full local Codex dashboard snapshot for the Web visual harness.
+    #[arg(long)]
+    dashboard: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
@@ -60,6 +66,22 @@ async fn main() -> anyhow::Result<()> {
     match args.provider {
         Provider::Codex => {
             let codex_root = args.codex_root.unwrap_or_else(|| home.join(".codex"));
+
+            if args.dashboard {
+                let provider = CodexDashboardProvider::new(&codex_root, &cache_dir);
+                if let Some(snapshot) = provider.load_dashboard_snapshot(Utc::now()).await? {
+                    let json = serde_json::to_string_pretty(&snapshot)?;
+                    tokio::fs::write(&args.output, json).await?;
+                    info!("Wrote dashboard JSON to {}", args.output.display());
+                } else {
+                    warn!(
+                        "No Codex dashboard data found at {}; no JSON was written",
+                        codex_root.display()
+                    );
+                }
+                return Ok(());
+            }
+
             let state_db_path = codex_root.join("state_5.sqlite");
             info!("Codex data root: {}", codex_root.display());
             info!("Codex state DB: {}", state_db_path.display());

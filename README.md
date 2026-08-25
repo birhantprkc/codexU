@@ -19,6 +19,19 @@ codexU v1.3.0 在 AI 领导力模型之外新增本机推理性能监测：从�
 
 codexU 是一个 macOS 菜单栏与桌面应用，用来查看 OpenAI Codex / ChatGPT Codex 和 Claude Code 的额度窗口、token 用量、今日任务和本机 AI 领导力。它把常用信息放在菜单栏和主窗口里，帮助你快速判断剩余额度、重置时间、当天工作进展，以及一个人正在调动多少 AI 劳动力。
 
+## Windows 版本已发布
+
+从 v1.3.0 开始，codexU 同时提供 Windows x86_64 桌面版本。Windows 安装包已经随 [GitHub v1.3.0 Release](https://github.com/shanggqm/codexU/releases/tag/v1.3.0) 发布，并提供 MSI 与 NSIS 两种安装方式：
+
+- `codexU-1.3.0-windows-x86_64.msi`：适合通过 Windows Installer 安装。
+- `codexU-1.3.0-windows-x86_64-setup.exe`：适合通过 NSIS 安装向导安装。
+- 支持 Windows 10/11 x86_64；Windows ARM64 当前尚未打包。
+- 验证环境说明：本轮 Windows V0 的原生视觉矩阵与 shell lifecycle 验收在按 build `26200` 归类的 Windows 11 环境完成；Windows 10 仍是支持目标，但未在本轮实机观测。
+- Windows 版本读取 `%USERPROFILE%\.codex\` 等本机数据，保持本地优先和隐私边界，不上传 usage、线程、路径、日志或账户数据。
+- Windows 版本当前只支持 Codex，暂不支持 Claude Code。
+
+Windows 版本是独立的 Tauri 桌面实现，当前发布包尚未由仓库默认流程进行代码签名；Windows 可能在首次运行时显示安全提示。Windows 与 macOS 的功能实现仍在分别演进，当前功能覆盖并不完全相同。
+
 ## 界面截图
 
 ![codexU v1.1.0 配色图库、设置与主界面](docs/screenshot-v1.1.0-palette-gallery.png)
@@ -127,6 +140,15 @@ codexU 需要读取本机 `~/.codex/` 下的 Codex 数据；如果启用 Claude 
 
 安装后，codexU 默认每天最多自动检查一次 GitHub Release 是否有新版本，并接收 beta 版本。该检查只读取公开 Release 元数据；发现新版时会打开浏览器下载 DMG 或查看 Release 页面，安装仍由你手动完成。可以在设置窗口的系统区关闭自动检查，或手动点击“检查更新”。
 
+### Windows
+
+从 [GitHub Release](https://github.com/shanggqm/codexU/releases/latest) 下载 Windows x86_64 安装包：
+
+- MSI：`codexU-<version>-windows-x86_64.msi`
+- NSIS：`codexU-<version>-windows-x86_64-setup.exe`
+
+运行安装程序并按向导完成安装。每个安装包旁边都提供对应的 `.sha256` 校验文件；发布包的构建、校验和当前限制见 [DISTRIBUTION.md](DISTRIBUTION.md)。
+
 ## 运行要求
 
 - macOS 13 或更新版本。
@@ -135,6 +157,12 @@ codexU 需要读取本机 `~/.codex/` 下的 Codex 数据；如果启用 Claude 
 - Codex 至少使用过一次，以便生成 `~/.codex/state_5.sqlite`。
 - Claude Code 统计为可选能力；历史 token 来自 `~/.claude/projects/**/*.jsonl`，额度需要本地 statusLine snapshot cache。
 - 从源码构建时需要 Xcode Command Line Tools。
+
+### Windows
+
+- Windows 10 或更新版本（x86_64）。
+- 本机已安装 Codex，并且已经生成 `%USERPROFILE%\.codex\` 下的本机数据。
+- Windows 版本当前只支持 Codex；Windows ARM64 当前不在发布范围内。
 
 ## 从源码构建
 

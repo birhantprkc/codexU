@@ -1,6 +1,7 @@
 import { Activity, Calendar, TrendingUp } from 'lucide-react';
 import { useRef, useState, type KeyboardEvent } from 'react';
 import type { CodexLeadershipSignal, UsageSnapshot } from '../types/models';
+import { InferencePerformancePanel } from './InferencePerformancePanel';
 import { LeadershipOverviewCard, LeadershipPanel } from './LeadershipPanel';
 import { MonthlyValueProgress } from './MonthlyValueProgress';
 import { ProjectsPanel } from './ProjectsPanel';
@@ -11,6 +12,7 @@ import { UsagePanel } from './UsagePanel';
 import { StatCard } from './StatCard';
 import { useI18n } from '../i18n/I18nProvider';
 import type { MessageKey } from '../i18n/messages';
+import { formatQuantity } from '../utils/formatQuantity';
 
 interface DashboardHomeProps {
   snapshot: UsageSnapshot | null | undefined;
@@ -19,12 +21,13 @@ interface DashboardHomeProps {
   onQuotaRefresh: () => void;
 }
 
-type DashboardContentTab = 'tasks' | 'leadership' | 'usage' | 'projects' | 'skills';
+type DashboardContentTab = 'tasks' | 'leadership' | 'usage' | 'inference' | 'projects' | 'skills';
 
 const DASHBOARD_TABS: Array<{ id: DashboardContentTab; title: string; titleKey: MessageKey }> = [
   { id: 'tasks', title: 'Tasks', titleKey: 'dashboard.tabs.tasks' },
   { id: 'leadership', title: 'AI Leadership', titleKey: 'dashboard.tabs.leadership' },
   { id: 'usage', title: 'Usage', titleKey: 'dashboard.tabs.usage' },
+  { id: 'inference', title: 'Inference', titleKey: 'dashboard.tabs.inference' },
   { id: 'projects', title: 'Projects', titleKey: 'dashboard.tabs.projects' },
   { id: 'skills', title: 'Skills', titleKey: 'dashboard.tabs.skills' },
 ];
@@ -46,6 +49,7 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
     tasks: null,
     leadership: null,
     usage: null,
+    inference: null,
     projects: null,
     skills: null,
   });
@@ -91,7 +95,7 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
         <section className="dashboard-home-metrics" aria-label={t('dashboard.aria.localTokenMetrics')}>
           <StatCard
             label={t('dashboard.metrics.today')}
-            value={formatNumber(hasUsage ? usage?.today_tokens ?? null : null)}
+            value={formatQuantity(hasUsage ? usage?.today_tokens ?? null : null)}
             subValue={
               detailed
                 ? t('dashboard.metrics.estimated', { value: formatUSD(detailed.today.estimated_cost_usd) })
@@ -103,7 +107,7 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
           />
           <StatCard
             label={t('dashboard.metrics.sevenDay')}
-            value={formatNumber(hasUsage ? usage?.seven_day_tokens ?? null : null)}
+            value={formatQuantity(hasUsage ? usage?.seven_day_tokens ?? null : null)}
             subValue={
               detailed
                 ? t('dashboard.metrics.estimated', { value: formatUSD(detailed.seven_day.estimated_cost_usd) })
@@ -115,7 +119,7 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
           />
           <StatCard
             label={t('dashboard.metrics.lifetime')}
-            value={formatNumber(hasUsage ? usage?.lifetime_tokens ?? null : null)}
+            value={formatQuantity(hasUsage ? usage?.lifetime_tokens ?? null : null)}
             subValue={
               detailed
                 ? t('dashboard.metrics.estimated', { value: formatUSD(detailed.lifetime.estimated_cost_usd) })
@@ -189,6 +193,16 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
         </section>
       )}
 
+      {activeDashboardTab === 'inference' && (
+        <section
+          role="tabpanel"
+          id="dashboard-home-panel-inference"
+          aria-labelledby="dashboard-home-tab-inference"
+        >
+          <InferencePerformancePanel inference={usage?.inference_performance ?? null} />
+        </section>
+      )}
+
       {activeDashboardTab === 'projects' && (
         <section
           role="tabpanel"
@@ -197,7 +211,6 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
         >
           <ProjectsPanel
             projectBoard={usage?.project_board ?? null}
-            tools={usage?.tool_usages ?? []}
           />
         </section>
       )}
@@ -208,14 +221,12 @@ export function DashboardHome({ snapshot, quotaSourceLabel, leadershipSignal, on
           id="dashboard-home-panel-skills"
           aria-labelledby="dashboard-home-tab-skills"
         >
-          <SkillsPanel skills={usage?.skill_usages ?? []} />
+          <SkillsPanel
+            skills={usage?.skill_usages ?? []}
+            tools={usage?.tool_usages ?? []}
+          />
         </section>
       )}
     </div>
   );
-}
-
-function formatNumber(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '--';
-  return Math.round(value).toLocaleString();
 }

@@ -406,14 +406,12 @@ async fn parse_transcript(
         // arguments, prompts, paths, or source contents.
         if envelope_type == Some("response_item") {
             if let Some(payload_type) = codex_string_value(payload.get("type")) {
-                if payload_type == "custom_tool_call" {
+                if payload_type == "function_call" || payload_type == "custom_tool_call" {
                     if let Some(name) = codex_string_value(payload.get("name")) {
                         if !name.is_empty() {
                             *summary.tool_calls.entry(name).or_insert(0) += 1;
                         }
                     }
-                }
-                if payload_type == "function_call" || payload_type == "custom_tool_call" {
                     summary
                         .skill_loads
                         .extend(safe_skill_loads_from_tool_payload(payload, Some(timestamp)));
@@ -927,6 +925,57 @@ mod tests {
         let detailed = usage.detailed_usage.unwrap();
         assert_eq!(detailed.parsed_file_count, 1);
         assert_eq!(detailed.token_event_count, 1);
+    }
+
+    #[tokio::test]
+    async fn aggregates_function_and_custom_tool_calls_without_exposing_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let archived = temp.path().join("archived_sessions");
+        tokio::fs::create_dir_all(&archived).await.unwrap();
+
+        let session = archived.join("rollout-mixed-tools.jsonl");
+        let private_argument = r#"{"cmd":"Get-Content 'C:\\Users\\private-user\\secret.txt'"}"#;
+        let lines = [
+            r#"{"timestamp":"2026-03-26T12:53:47.026Z","type":"session_meta","payload":{"id":"session-mixed","cwd":"h:\\project\\demo","model_provider":"openai"}}"#.to_string(),
+            r#"{"timestamp":"2026-03-26T12:53:47.164Z","type":"event_msg","payload":{"type":"token_count","turn_id":"turn-1","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50,"reasoning_output_tokens":0,"total_tokens":150}}}}"#.to_string(),
+            format!(
+                r#"{{"timestamp":"2026-03-26T12:53:48.000Z","type":"response_item","payload":{{"type":"function_call","name":"read_file","arguments":{}}}}}"#,
+                serde_json::to_string(private_argument).unwrap()
+            ),
+            r#"{"timestamp":"2026-03-26T12:53:49.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call-2","name":"apply_patch","input":"replace private content"}}"#.to_string(),
+            r#"{"timestamp":"2026-03-26T12:53:50.000Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"same tool, second event"}}"#.to_string(),
+        ];
+        tokio::fs::write(&session, lines.join("\n")).await.unwrap();
+
+        let cache = temp.path().join("cache");
+        let reader = CodexTranscriptReader::new(&cache);
+        let usage = reader
+            .load_local_usage(temp.path(), Utc::now())
+            .await
+            .unwrap()
+            .expect("should produce LocalUsage");
+
+        assert_eq!(usage.tool_usages.len(), 2);
+        assert_eq!(
+            usage
+                .tool_usages
+                .iter()
+                .find(|tool| tool.name == "read_file")
+                .map(|tool| tool.call_count),
+            Some(2)
+        );
+        assert_eq!(
+            usage
+                .tool_usages
+                .iter()
+                .find(|tool| tool.name == "apply_patch")
+                .map(|tool| tool.call_count),
+            Some(1)
+        );
+
+        let dashboard_json = serde_json::to_string(&usage).unwrap();
+        assert!(!dashboard_json.contains(private_argument));
+        assert!(!dashboard_json.contains("replace private content"));
     }
 
     #[tokio::test]

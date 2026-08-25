@@ -10,6 +10,7 @@ import {
 } from 'recharts';
 import type { TokenBreakdown, UsageTrend } from '../types/models';
 import { useI18n } from '../i18n/I18nProvider';
+import { formatQuantity } from '../utils/formatQuantity';
 
 interface TrendChartProps {
   trend: UsageTrend | null;
@@ -72,11 +73,11 @@ export function TrendChart({ trend }: TrendChartProps) {
       <div className="usage-trend-summary" aria-label={t('usage.lastSevenSummary')}>
         <div>
           <span>{t('usage.lastSevenDays')}</span>
-          <strong>{formatTokens(visibleTotalTokens(trend.summary.seven_day.tokens))}</strong>
+          <strong>{formatQuantity(visibleTotalTokens(trend.summary.seven_day.tokens))}</strong>
         </div>
         <div>
           <span>{t('usage.dailyAverage')}</span>
-          <strong>{formatTokens(trend.summary.daily_average_tokens)}</strong>
+          <strong>{formatQuantity(trend.summary.daily_average_tokens)}</strong>
         </div>
         <div>
           <span>{t('usage.change')}</span>
@@ -104,7 +105,7 @@ export function TrendChart({ trend }: TrendChartProps) {
               tick={{ fill: 'var(--text-secondary)', fontSize: 12 }}
               axisLine={false}
               tickLine={false}
-              tickFormatter={(v: number) => formatCompact(v)}
+              tickFormatter={(v: number) => formatQuantity(v)}
             />
             <Tooltip
               contentStyle={{
@@ -113,7 +114,7 @@ export function TrendChart({ trend }: TrendChartProps) {
                 borderRadius: '8px',
                 color: 'var(--text-primary)',
               }}
-              formatter={(value: number) => [formatNumber(value), t('usage.tokenLabel')]}
+                formatter={(value: number) => [formatQuantity(value), t('usage.tokenLabel')]}
             />
             <Area
               type="monotone"
@@ -129,22 +130,8 @@ export function TrendChart({ trend }: TrendChartProps) {
   );
 }
 
-function formatCompact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
-function formatNumber(n: number): string {
-  return n.toLocaleString();
-}
-
 function visibleTotalTokens(tokens: TokenBreakdown): number {
   return Math.max(tokens.total_tokens, tokens.input_tokens + tokens.output_tokens);
-}
-
-function formatTokens(value: number): string {
-  return Math.round(value).toLocaleString();
 }
 
 function formatChange(value: number | null, isNewActivity: boolean, t: ReturnType<typeof useI18n>['t']): string {

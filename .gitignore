@@ -36,3 +36,9 @@ explore/
 
 # Private local visual-acceptance artifacts (screenshots, logs, and capture helpers)
 /.local-artifacts/
+
+# Local WorkBlock state remains available to project skills but is never committed.
+/.workblock/
+
+# Local planning state
+/.planning/
