@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::StatisticsTimeZone;
 
 pub const INFERENCE_MINIMUM_CALL_DURATION_SECONDS: f64 = 0.1;
 
@@ -193,28 +195,18 @@ impl InferencePerformanceBuilder {
         samples: &[InferencePerformanceSample],
         recording_started_at: DateTime<Utc>,
         now: DateTime<Utc>,
+        statistics_time_zone: StatisticsTimeZone,
     ) -> Option<InferencePerformanceHistory> {
-        let day_start = Utc
-            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-            .unwrap();
-        let day_end = day_start + chrono::Duration::days(1);
+        let day_start = statistics_time_zone.day_start(now);
+        let day_end = statistics_time_zone.next_day_start(day_start);
 
         let period = |period: InferencePerformancePeriod| {
-            let window_start = day_start - chrono::Duration::days(period.day_count() - 1);
-            let recording_day_start = Utc
-                .with_ymd_and_hms(
-                    recording_started_at.year(),
-                    recording_started_at.month(),
-                    recording_started_at.day(),
-                    0,
-                    0,
-                    0,
-                )
-                .unwrap();
+            let window_start =
+                statistics_time_zone.days_before_start(day_start, period.day_count() - 1);
+            let recording_day_start = statistics_time_zone.day_start(recording_started_at);
             let coverage_start = window_start.max(recording_day_start);
-            let elapsed_days = day_start
-                .signed_duration_since(coverage_start)
-                .num_days()
+            let elapsed_days = statistics_time_zone
+                .calendar_day_distance(coverage_start, day_start)
                 .max(0);
             let coverage_day_count = (elapsed_days + 1).clamp(1, period.day_count());
             Self::make(samples, period, window_start, day_end, coverage_day_count)

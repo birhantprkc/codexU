@@ -1,16 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::common::{enumerate_jsonl_files, MAX_LINE_BYTES};
+use super::common::{
+    index_codex_rollout_files, CodexRolloutIndexEntry, FileFingerprint, MAX_LINE_BYTES,
+    READ_CHUNK_BYTES,
+};
 use crate::models::{
     InferencePerformanceArchive, InferencePerformanceBuilder, InferencePerformanceHistory,
     InferencePerformanceSample, TokenBreakdown, INFERENCE_MINIMUM_CALL_DURATION_SECONDS,
 };
+use crate::StatisticsTimeZone;
 
-const INFERENCE_CACHE_VERSION: i32 = 1;
+const INFERENCE_CACHE_VERSION: i32 = 2;
+const INFERENCE_PARSER_VERSION: i32 = 1;
 const MAXIMUM_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 const MAXIMUM_SAMPLE_COUNT: usize = 50_000;
 
@@ -38,16 +44,55 @@ const INPUT_BOUNDARY_PAYLOAD_TYPES: &[&str] = &[
 struct DiskEnvelope {
     version: i32,
     archive: InferencePerformanceArchive,
+    entries: HashMap<String, InferenceFileCacheEntry>,
+}
+
+impl DiskEnvelope {
+    fn empty(now: DateTime<Utc>) -> Self {
+        Self {
+            version: INFERENCE_CACHE_VERSION,
+            archive: InferencePerformanceArchive::new(now),
+            entries: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct InferenceFileCacheEntry {
+    file_size: i64,
+    modification_time_ns: Option<i64>,
+    parser_version: i32,
+    parsed: ParsedInferenceFile,
+}
+
+impl InferenceFileCacheEntry {
+    fn matches(&self, fingerprint: &FileFingerprint) -> bool {
+        self.file_size == fingerprint.file_size
+            && self.modification_time_ns == fingerprint.modification_time_ns
+            && self.parser_version == INFERENCE_PARSER_VERSION
+    }
 }
 
 pub struct InferencePerformanceReader {
     cache_dir: PathBuf,
+    statistics_time_zone: StatisticsTimeZone,
 }
 
 impl InferencePerformanceReader {
     pub fn new(cache_dir: impl AsRef<Path>) -> Self {
         Self {
             cache_dir: cache_dir.as_ref().to_path_buf(),
+            statistics_time_zone: StatisticsTimeZone::Local,
+        }
+    }
+
+    pub fn new_with_timezone(
+        cache_dir: impl AsRef<Path>,
+        statistics_time_zone: StatisticsTimeZone,
+    ) -> Self {
+        Self {
+            cache_dir: cache_dir.as_ref().to_path_buf(),
+            statistics_time_zone,
         }
     }
 
@@ -56,65 +101,91 @@ impl InferencePerformanceReader {
         codex_root: impl AsRef<Path>,
         now: DateTime<Utc>,
     ) -> anyhow::Result<Option<InferencePerformanceHistory>> {
-        let codex_root = codex_root.as_ref();
-        let retention_start = day_start(now) - chrono::Duration::days(27);
-        let mut archive = self.load_archive(now).await;
+        let index = index_codex_rollout_files(codex_root.as_ref()).await;
+        self.load_from_index(&index, now).await
+    }
 
-        let mut files = Vec::new();
-        let archived = codex_root.join("archived_sessions");
-        let sessions = codex_root.join("sessions");
-        if tokio::fs::try_exists(&archived).await.unwrap_or(false) {
-            files.extend(enumerate_jsonl_files(&archived).await);
-        }
-        if tokio::fs::try_exists(&sessions).await.unwrap_or(false) {
-            files.extend(enumerate_jsonl_files(&sessions).await);
-        }
-        files.sort();
-        files.dedup();
+    pub(crate) async fn load_from_index(
+        &self,
+        index: &[CodexRolloutIndexEntry],
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<InferencePerformanceHistory>> {
+        let retention_start = self.statistics_time_zone.days_before_start(now, 27);
+        let mut cache = self.load_cache(now).await;
+
+        let live_paths: HashSet<String> = index
+            .iter()
+            .map(|entry| source_identifier(&entry.path))
+            .collect();
+        cache.entries.retain(|path, _| live_paths.contains(path));
 
         let mut samples_by_source_id: HashMap<String, Vec<InferencePerformanceSample>> =
             HashMap::new();
-        for file in files {
-            let parsed = parse_inference_samples(&file).await;
+        for indexed in index {
+            let file = &indexed.path;
+            let key = source_identifier(file);
+            let cached = indexed.fingerprint.as_ref().and_then(|fingerprint| {
+                cache
+                    .entries
+                    .get(&key)
+                    .filter(|entry| entry.matches(fingerprint))
+                    .map(|entry| entry.parsed.clone())
+            });
+            let parsed = if let Some(parsed) = cached {
+                parsed
+            } else {
+                let parsed = parse_inference_samples(file).await;
+                if let Some(fingerprint) = indexed.fingerprint {
+                    cache.entries.insert(
+                        key,
+                        InferenceFileCacheEntry {
+                            file_size: fingerprint.file_size,
+                            modification_time_ns: fingerprint.modification_time_ns,
+                            parser_version: INFERENCE_PARSER_VERSION,
+                            parsed: parsed.clone(),
+                        },
+                    );
+                }
+                parsed
+            };
             samples_by_source_id
-                .entry(parsed.source_id.unwrap_or_else(|| source_identifier(&file)))
+                .entry(parsed.source_id.unwrap_or_else(|| source_identifier(file)))
                 .or_default()
                 .extend(parsed.samples);
         }
         for (source_id, samples) in samples_by_source_id {
-            archive.replace_samples(source_id, samples, retention_start);
+            cache
+                .archive
+                .replace_samples(source_id, samples, retention_start);
         }
-        archive.compact(retention_start, MAXIMUM_SAMPLE_COUNT);
-        let _ = self.save_archive(&archive).await;
+        cache.archive.compact(retention_start, MAXIMUM_SAMPLE_COUNT);
+        let _ = self.save_cache(&cache).await;
 
         Ok(InferencePerformanceBuilder::make_history(
-            &archive.samples(),
-            archive.recording_started_at,
+            &cache.archive.samples(),
+            cache.archive.recording_started_at,
             now,
+            self.statistics_time_zone,
         ))
     }
 
-    async fn load_archive(&self, now: DateTime<Utc>) -> InferencePerformanceArchive {
+    async fn load_cache(&self, now: DateTime<Utc>) -> DiskEnvelope {
         let path = self.archive_path();
         match tokio::fs::metadata(&path).await {
             Ok(meta) if meta.len() <= MAXIMUM_ARCHIVE_BYTES => {}
-            _ => return InferencePerformanceArchive::new(now),
+            _ => return DiskEnvelope::empty(now),
         }
         match tokio::fs::read(&path).await {
             Ok(data) => match serde_json::from_slice::<DiskEnvelope>(&data) {
-                Ok(envelope) if envelope.version == INFERENCE_CACHE_VERSION => envelope.archive,
-                _ => InferencePerformanceArchive::new(now),
+                Ok(envelope) if envelope.version == INFERENCE_CACHE_VERSION => envelope,
+                _ => DiskEnvelope::empty(now),
             },
-            _ => InferencePerformanceArchive::new(now),
+            _ => DiskEnvelope::empty(now),
         }
     }
 
-    async fn save_archive(&self, archive: &InferencePerformanceArchive) -> bool {
+    async fn save_cache(&self, envelope: &DiskEnvelope) -> bool {
         let path = self.archive_path();
-        let envelope = DiskEnvelope {
-            version: INFERENCE_CACHE_VERSION,
-            archive: archive.clone(),
-        };
         let Ok(data) = serde_json::to_vec(&envelope) else {
             return false;
         };
@@ -136,7 +207,7 @@ impl InferencePerformanceReader {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ParsedInferenceFile {
     source_id: Option<String>,
     samples: Vec<InferencePerformanceSample>,
@@ -144,93 +215,136 @@ struct ParsedInferenceFile {
 
 async fn parse_inference_samples(path: &Path) -> ParsedInferenceFile {
     let mut parsed = ParsedInferenceFile::default();
-    let Ok(data) = tokio::fs::read(path).await else {
+    let Ok(file) = tokio::fs::File::open(path).await else {
         return parsed;
     };
 
     let mut tracker = InferenceCallTracker::default();
     let mut seen_sample_ids = HashSet::new();
+    let mut reader = BufReader::with_capacity(READ_CHUNK_BYTES, file);
+    let mut line = Vec::with_capacity(READ_CHUNK_BYTES);
+    let mut oversized = false;
 
-    for line in data.split(|byte| *byte == b'\n') {
-        if line.is_empty() || line.len() > MAX_LINE_BYTES {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(line) else {
-            continue;
+    loop {
+        let Ok(buffer) = reader.fill_buf().await else {
+            break;
         };
-        let Ok(object) = serde_json::from_str::<serde_json::Value>(text) else {
-            continue;
-        };
-        let Some(payload) = object.get("payload") else {
-            continue;
-        };
-        if payload.is_null() {
-            continue;
+        if buffer.is_empty() {
+            break;
         }
 
-        let timestamp = date_value(object.get("timestamp"))
-            .or_else(|| date_value(payload.get("timestamp")))
-            .unwrap_or_else(Utc::now);
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map(|index| index + 1).unwrap_or(buffer.len());
+        let content_len = newline.unwrap_or(buffer.len());
 
-        if object.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
-            if parsed.source_id.is_none() {
-                parsed.source_id = string_value(payload.get("id"))
-                    .and_then(|id| normalize(Some(id)))
-                    .map(|id| format!("session-{id}"));
+        if !oversized {
+            if line.len().saturating_add(content_len) > MAX_LINE_BYTES {
+                line.clear();
+                oversized = true;
+            } else {
+                line.extend_from_slice(&buffer[..content_len]);
             }
-            continue;
         }
+        reader.consume(consumed);
 
-        if object.get("type").and_then(|v| v.as_str()) == Some("turn_context") {
-            tracker.apply_turn_context(
-                string_value(payload.get("model")),
-                string_value(payload.get("effort")),
-                timestamp,
-            );
-            continue;
-        }
-
-        let payload_type = string_value(payload.get("type"));
-        let payload_type = payload_type.as_deref();
-
-        if payload_type
-            .map(|value| MODEL_OUTPUT_PAYLOAD_TYPES.contains(&value))
-            .unwrap_or(false)
-            || string_value(payload.get("role")).as_deref() == Some("assistant")
-        {
-            tracker.observe_model_output();
-        }
-
-        if payload_type
-            .map(|value| INPUT_BOUNDARY_PAYLOAD_TYPES.contains(&value))
-            .unwrap_or(false)
-        {
-            tracker.apply_input_boundary(timestamp);
-            continue;
-        }
-
-        if payload_type != Some("token_count") {
-            continue;
-        }
-
-        let turn_id = string_value(payload.get("turn_id"));
-        let sample_id = token_event_sample_id(turn_id.as_deref(), timestamp);
-
-        let Some(info) = payload.get("info") else {
-            continue;
-        };
-        let Some(last_usage) = info.get("last_token_usage").and_then(parse_usage) else {
-            continue;
-        };
-
-        if let Some(sample) = tracker.consume_token_event(timestamp, sample_id, &last_usage) {
-            if seen_sample_ids.insert(sample.sample_id.clone()) {
-                parsed.samples.push(sample);
+        if newline.is_some() {
+            if !oversized {
+                apply_inference_line(&line, &mut parsed, &mut tracker, &mut seen_sample_ids);
             }
+            line.clear();
+            oversized = false;
         }
     }
 
+    if !oversized {
+        apply_inference_line(&line, &mut parsed, &mut tracker, &mut seen_sample_ids);
+    }
+
     parsed
+}
+
+fn apply_inference_line(
+    line: &[u8],
+    parsed: &mut ParsedInferenceFile,
+    tracker: &mut InferenceCallTracker,
+    seen_sample_ids: &mut HashSet<String>,
+) {
+    if line.is_empty() {
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(line) else {
+        return;
+    };
+    let Ok(object) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let Some(payload) = object.get("payload") else {
+        return;
+    };
+    if payload.is_null() {
+        return;
+    }
+
+    let timestamp = date_value(object.get("timestamp"))
+        .or_else(|| date_value(payload.get("timestamp")))
+        .unwrap_or_else(Utc::now);
+
+    if object.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+        if parsed.source_id.is_none() {
+            parsed.source_id = string_value(payload.get("id"))
+                .and_then(|id| normalize(Some(id)))
+                .map(|id| format!("session-{id}"));
+        }
+        return;
+    }
+
+    if object.get("type").and_then(|v| v.as_str()) == Some("turn_context") {
+        tracker.apply_turn_context(
+            string_value(payload.get("model")),
+            string_value(payload.get("effort")),
+            timestamp,
+        );
+        return;
+    }
+
+    let payload_type = string_value(payload.get("type"));
+    let payload_type = payload_type.as_deref();
+
+    if payload_type
+        .map(|value| MODEL_OUTPUT_PAYLOAD_TYPES.contains(&value))
+        .unwrap_or(false)
+        || string_value(payload.get("role")).as_deref() == Some("assistant")
+    {
+        tracker.observe_model_output();
+    }
+
+    if payload_type
+        .map(|value| INPUT_BOUNDARY_PAYLOAD_TYPES.contains(&value))
+        .unwrap_or(false)
+    {
+        tracker.apply_input_boundary(timestamp);
+        return;
+    }
+
+    if payload_type != Some("token_count") {
+        return;
+    }
+
+    let turn_id = string_value(payload.get("turn_id"));
+    let sample_id = token_event_sample_id(turn_id.as_deref(), timestamp);
+
+    let Some(info) = payload.get("info") else {
+        return;
+    };
+    let Some(last_usage) = info.get("last_token_usage").and_then(parse_usage) else {
+        return;
+    };
+
+    if let Some(sample) = tracker.consume_token_event(timestamp, sample_id, &last_usage) {
+        if seen_sample_ids.insert(sample.sample_id.clone()) {
+            parsed.samples.push(sample);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -355,11 +469,6 @@ fn date_value(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .ok()
         .map(|date| date.with_timezone(&Utc))
-}
-
-fn day_start(date: DateTime<Utc>) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
-        .unwrap()
 }
 
 fn source_identifier(path: &Path) -> String {

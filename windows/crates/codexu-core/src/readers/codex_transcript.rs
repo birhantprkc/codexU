@@ -157,47 +157,55 @@ impl CodexTranscriptReader {
         }))
     }
 
+    pub(crate) async fn load_dashboard_inputs_from_index(
+        &self,
+        index: &[CodexRolloutIndexEntry],
+        metadata: HashMap<String, CodexThreadMetadata>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<(Option<LocalUsage>, Option<Vec<SessionSummary>>)> {
+        let Some(summaries) = self.load_local_summaries_from_index(index).await? else {
+            return Ok((None, None));
+        };
+        let skill_usages = make_skill_usages(&summaries);
+        let sessions = combine_session_metadata(summaries, metadata);
+        let local_usage = make_local_usage(sessions.clone(), now).map(|mut usage| {
+            usage.skill_usages = skill_usages;
+            usage
+        });
+        Ok((local_usage, Some(sessions)))
+    }
+
     async fn load_local_summaries_internal(
         &self,
         data_root: impl AsRef<Path>,
     ) -> anyhow::Result<Option<Vec<CodexTranscriptSummary>>> {
-        let data_root = data_root.as_ref();
-        if !tokio::fs::try_exists(data_root).await.unwrap_or(false) {
+        let index = index_codex_rollout_files(data_root.as_ref()).await;
+        self.load_local_summaries_from_index(&index).await
+    }
+
+    async fn load_local_summaries_from_index(
+        &self,
+        index: &[CodexRolloutIndexEntry],
+    ) -> anyhow::Result<Option<Vec<CodexTranscriptSummary>>> {
+        if index.is_empty() {
             return Ok(None);
         }
-
-        let archived_dir = data_root.join("archived_sessions");
-        let sessions_dir = data_root.join("sessions");
-
-        let mut files = Vec::new();
-        if tokio::fs::try_exists(&archived_dir).await.unwrap_or(false) {
-            files.extend(enumerate_jsonl_files(&archived_dir).await);
-        }
-        if tokio::fs::try_exists(&sessions_dir).await.unwrap_or(false) {
-            files.extend(enumerate_jsonl_files(&sessions_dir).await);
-        }
-
-        if files.is_empty() {
-            return Ok(None);
-        }
-
-        files.sort();
-        files.dedup();
 
         let mut cache = self.read_cache().await;
-        let live_paths: HashSet<String> = files
+        let live_paths: HashSet<String> = index
             .iter()
-            .map(|f| f.to_string_lossy().to_string())
+            .map(|entry| entry.path.to_string_lossy().to_string())
             .collect();
         cache.entries.retain(|k, _| live_paths.contains(k));
 
         let mut summaries = Vec::new();
-        for file in files {
-            let fingerprint = fingerprint_for(&file).await;
+        for indexed in index {
+            let file = &indexed.path;
+            let fingerprint = indexed.fingerprint.as_ref();
             let key = file.to_string_lossy().to_string();
 
             if let Some(entry) = cache.entries.get(&key) {
-                if let Some(ref fp) = fingerprint {
+                if let Some(fp) = fingerprint {
                     if entry.matches(fp) {
                         summaries.push(entry.summary.clone());
                         continue;
@@ -205,7 +213,7 @@ impl CodexTranscriptReader {
                 }
             }
 
-            let summary = parse_transcript(&file, fingerprint.as_ref()).await;
+            let summary = parse_transcript(file, fingerprint).await;
             if let Some(fp) = fingerprint {
                 cache.entries.insert(
                     key,

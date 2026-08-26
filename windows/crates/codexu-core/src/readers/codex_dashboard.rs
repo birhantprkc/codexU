@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 
 use crate::models::*;
 use crate::readers::{
-    build_leadership_snapshot, CodexAppServerQuotaSnapshot, CodexStateReader, CodexTaskBoardReader,
-    CodexThreadMetadata, CodexTranscriptReader, InferencePerformanceReader,
+    build_leadership_snapshot, index_codex_rollout_files, CodexAppServerQuotaSnapshot,
+    CodexStateReader, CodexTaskBoardReader, CodexThreadMetadata, CodexTranscriptReader,
+    InferencePerformanceReader,
 };
 
 /// Default leadership period for dashboard visibility.
@@ -109,12 +110,10 @@ impl CodexDashboardProvider {
     ) -> anyhow::Result<Option<CodexDashboardSnapshot>> {
         let (state_metadata, messages) = self.load_state_metadata().await?;
 
+        let rollout_index = index_codex_rollout_files(&self.codex_root).await;
         let transcript_reader = CodexTranscriptReader::new(&self.cache_dir);
-        let mut local_usage = transcript_reader
-            .load_local_usage_with_metadata(&self.codex_root, state_metadata.clone(), now)
-            .await?;
-        let summaries = transcript_reader
-            .load_local_session_summaries(&self.codex_root, state_metadata)
+        let (mut local_usage, summaries) = transcript_reader
+            .load_dashboard_inputs_from_index(&rollout_index, state_metadata, now)
             .await?;
         let Some(summaries) = summaries else {
             return Ok(None);
@@ -130,7 +129,7 @@ impl CodexDashboardProvider {
 
         if let Some(local) = local_usage.as_mut() {
             local.inference_performance = InferencePerformanceReader::new(&self.cache_dir)
-                .load(&self.codex_root, now)
+                .load_from_index(&rollout_index, now)
                 .await
                 .unwrap_or(None);
         }
@@ -331,6 +330,35 @@ mod tests {
 
     fn write_session_file(path: &std::path::Path, lines: Vec<&str>) {
         std::fs::write(path, lines.join("\n")).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_refresh_indexes_each_rollout_once() {
+        let temp = tempdir().unwrap();
+        let archived = temp.path().join("archived_sessions");
+        std::fs::create_dir_all(&archived).unwrap();
+        write_session_file(
+            &archived.join("rollout-single-index.jsonl"),
+            vec![
+                r#"{"timestamp":"2026-08-05T11:59:50.000Z","type":"session_meta","payload":{"id":"single-index","cwd":"C:\\workspace"}}"#,
+                r#"{"timestamp":"2026-08-05T12:00:00.000Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5","effort":"high"}}"#,
+                r#"{"timestamp":"2026-08-05T12:00:01.000Z","type":"response_item","payload":{"type":"agent_message","role":"assistant"}}"#,
+                r#"{"timestamp":"2026-08-05T12:00:04.000Z","type":"event_msg","payload":{"type":"token_count","turn_id":"turn-1","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":140}}}}"#,
+            ],
+        );
+
+        crate::readers::common::reset_rollout_io_counts();
+        let snapshot = CodexDashboardProvider::new(temp.path(), temp.path().join("cache"))
+            .load_dashboard_snapshot(Utc.with_ymd_and_hms(2026, 8, 5, 12, 0, 10).unwrap())
+            .await
+            .unwrap();
+
+        assert!(snapshot.is_some());
+        assert_eq!(
+            crate::readers::common::rollout_io_counts(),
+            (1, 1),
+            "one refresh should enumerate the existing rollout root once and fingerprint its file once"
+        );
     }
 
     #[tokio::test]

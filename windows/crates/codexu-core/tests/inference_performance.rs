@@ -2,7 +2,11 @@ use chrono::{Duration, TimeZone, Utc};
 use codexu_core::{
     readers::{CodexDashboardProvider, InferencePerformanceReader},
     InferencePerformanceArchive, InferencePerformancePeriod, InferencePerformanceSample,
+    StatisticsTimeZone,
 };
+use std::fs::{FileTimes, OpenOptions};
+use std::io::Write;
+use std::time::{Duration as StdDuration, Instant};
 use tempfile::tempdir;
 
 fn write_session(path: &std::path::Path, lines: Vec<String>) {
@@ -120,6 +124,498 @@ fn inference_history(
         .inference_performance
         .as_ref()
         .expect("inference performance is an independent local branch")
+}
+
+fn cached_sample(
+    sample_id: &str,
+    completed_at: chrono::DateTime<Utc>,
+    output_tokens: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "sample_id": sample_id,
+        "completed_at": completed_at.timestamp_millis(),
+        "duration_seconds": 2.0,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": 0,
+        "model": "gpt-5",
+        "effort": "high",
+    })
+}
+
+fn write_cached_samples(
+    cache: &std::path::Path,
+    recording_started_at: chrono::DateTime<Utc>,
+    samples: Vec<serde_json::Value>,
+) -> std::path::PathBuf {
+    let cache_file = cache.join("codex").join("inference-performance-v1.json");
+    std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+    let envelope = serde_json::json!({
+        "version": 2,
+        "archive": {
+            "recording_started_at": recording_started_at.timestamp_millis(),
+            "samples_by_source_id": {
+                "timezone-fixture": samples,
+            }
+        },
+        "entries": {}
+    });
+    std::fs::write(&cache_file, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    cache_file
+}
+
+#[tokio::test]
+async fn today_uses_utc_calendar_boundary() {
+    let temp = tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let day_start = Utc.with_ymd_and_hms(2026, 8, 5, 0, 0, 0).unwrap();
+    let now = day_start + Duration::minutes(30);
+    write_cached_samples(
+        &cache,
+        day_start - Duration::milliseconds(1),
+        vec![
+            cached_sample("before", day_start - Duration::milliseconds(1), 20),
+            cached_sample("at-start", day_start, 10),
+        ],
+    );
+
+    let history = InferencePerformanceReader::new_with_timezone(
+        &cache,
+        StatisticsTimeZone::Named(chrono_tz::UTC),
+    )
+    .load(temp.path(), now)
+    .await
+    .unwrap()
+    .expect("history");
+    let today = history.today.expect("today");
+
+    assert_eq!(today.total_call_count, 1);
+    assert_eq!(today.groups[0].output_tokens, 10);
+}
+
+#[tokio::test]
+async fn today_uses_positive_offset_calendar_boundary() {
+    let temp = tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let local_day_start = Utc.with_ymd_and_hms(2026, 8, 4, 16, 0, 0).unwrap();
+    let now = local_day_start + Duration::minutes(30);
+    write_cached_samples(
+        &cache,
+        local_day_start - Duration::milliseconds(1),
+        vec![
+            cached_sample(
+                "previous-local-day",
+                local_day_start - Duration::milliseconds(1),
+                20,
+            ),
+            cached_sample("local-midnight", local_day_start, 10),
+        ],
+    );
+
+    let history = InferencePerformanceReader::new_with_timezone(
+        &cache,
+        StatisticsTimeZone::Named(chrono_tz::Asia::Shanghai),
+    )
+    .load(temp.path(), now)
+    .await
+    .unwrap()
+    .expect("history");
+    let today = history.today.expect("today");
+
+    assert_eq!(today.total_call_count, 1);
+    assert_eq!(today.groups[0].output_tokens, 10);
+}
+
+#[tokio::test]
+async fn today_uses_negative_offset_calendar_boundary() {
+    let temp = tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let local_day_start = Utc.with_ymd_and_hms(2026, 8, 5, 7, 0, 0).unwrap();
+    let now = local_day_start + Duration::minutes(30);
+    write_cached_samples(
+        &cache,
+        local_day_start - Duration::milliseconds(1),
+        vec![
+            cached_sample(
+                "previous-local-day",
+                local_day_start - Duration::milliseconds(1),
+                20,
+            ),
+            cached_sample("local-midnight", local_day_start, 10),
+        ],
+    );
+
+    let history = InferencePerformanceReader::new_with_timezone(
+        &cache,
+        StatisticsTimeZone::Named(chrono_tz::America::Los_Angeles),
+    )
+    .load(temp.path(), now)
+    .await
+    .unwrap()
+    .expect("history");
+    let today = history.today.expect("today");
+
+    assert_eq!(today.total_call_count, 1);
+    assert_eq!(today.groups[0].output_tokens, 10);
+}
+
+#[tokio::test]
+async fn spring_forward_today_stops_at_the_next_local_midnight() {
+    let temp = tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let local_day_start = Utc.with_ymd_and_hms(2026, 3, 8, 5, 0, 0).unwrap();
+    let next_local_day_start = Utc.with_ymd_and_hms(2026, 3, 9, 4, 0, 0).unwrap();
+    let now = next_local_day_start - Duration::minutes(15);
+    write_cached_samples(
+        &cache,
+        local_day_start,
+        vec![
+            cached_sample("local-midnight", local_day_start, 10),
+            cached_sample(
+                "late-spring-day",
+                next_local_day_start - Duration::minutes(30),
+                20,
+            ),
+            cached_sample(
+                "next-local-day",
+                next_local_day_start + Duration::minutes(15),
+                40,
+            ),
+        ],
+    );
+
+    let history = InferencePerformanceReader::new_with_timezone(
+        &cache,
+        StatisticsTimeZone::Named(chrono_tz::America::New_York),
+    )
+    .load(temp.path(), now)
+    .await
+    .unwrap()
+    .expect("history");
+    let today = history.today.expect("today");
+
+    assert_eq!(today.total_call_count, 2);
+    assert_eq!(today.groups[0].output_tokens, 30);
+}
+
+#[tokio::test]
+async fn fall_back_today_includes_the_full_twenty_five_hour_local_day() {
+    let temp = tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let local_day_start = Utc.with_ymd_and_hms(2026, 11, 1, 4, 0, 0).unwrap();
+    let next_local_day_start = Utc.with_ymd_and_hms(2026, 11, 2, 5, 0, 0).unwrap();
+    let now = next_local_day_start - Duration::minutes(15);
+    write_cached_samples(
+        &cache,
+        local_day_start,
+        vec![
+            cached_sample("local-midnight", local_day_start, 10),
+            cached_sample(
+                "first-one-thirty",
+                Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0).unwrap(),
+                20,
+            ),
+            cached_sample(
+                "second-one-thirty",
+                Utc.with_ymd_and_hms(2026, 11, 1, 6, 30, 0).unwrap(),
+                40,
+            ),
+            cached_sample(
+                "late-fall-day",
+                next_local_day_start - Duration::minutes(30),
+                80,
+            ),
+        ],
+    );
+
+    let history = InferencePerformanceReader::new_with_timezone(
+        &cache,
+        StatisticsTimeZone::Named(chrono_tz::America::New_York),
+    )
+    .load(temp.path(), now)
+    .await
+    .unwrap()
+    .expect("history");
+    let today = history.today.expect("today");
+
+    assert_eq!(today.total_call_count, 4);
+    assert_eq!(today.groups[0].output_tokens, 150);
+}
+
+#[tokio::test]
+async fn retention_coverage_and_daily_averages_use_calendar_days_across_dst() {
+    let temp = tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let now = Utc.with_ymd_and_hms(2026, 3, 20, 16, 0, 0).unwrap();
+    let retention_start = Utc.with_ymd_and_hms(2026, 2, 21, 5, 0, 0).unwrap();
+    let cache_file = write_cached_samples(
+        &cache,
+        retention_start - Duration::milliseconds(1),
+        vec![
+            cached_sample(
+                "outside-retention",
+                retention_start - Duration::milliseconds(1),
+                40,
+            ),
+            cached_sample("retention-boundary", retention_start, 20),
+            cached_sample("current-local-day", now - Duration::minutes(1), 10),
+        ],
+    );
+
+    let history = InferencePerformanceReader::new_with_timezone(
+        &cache,
+        StatisticsTimeZone::Named(chrono_tz::America::New_York),
+    )
+    .load(temp.path(), now)
+    .await
+    .unwrap()
+    .expect("history");
+
+    let seven_days = history.seven_days.expect("seven days");
+    assert_eq!(seven_days.coverage_day_count, 7);
+    assert_eq!(seven_days.total_call_count, 1);
+    assert!((seven_days.groups[0].average_daily_call_count - (1.0 / 7.0)).abs() < 0.000_1);
+
+    let twenty_eight_days = history.twenty_eight_days.expect("twenty eight days");
+    assert_eq!(twenty_eight_days.coverage_day_count, 28);
+    assert_eq!(twenty_eight_days.total_call_count, 2);
+    assert!((twenty_eight_days.groups[0].average_daily_call_count - (2.0 / 28.0)).abs() < 0.000_1);
+
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(cache_file).unwrap()).unwrap();
+    let saved_samples = saved["archive"]["samples_by_source_id"]["timezone-fixture"]
+        .as_array()
+        .unwrap();
+    assert_eq!(saved_samples.len(), 2, "pre-boundary sample is removed");
+    assert!(saved_samples.iter().any(|sample| {
+        sample["sample_id"] == "retention-boundary"
+            && sample["completed_at"] == retention_start.timestamp_millis()
+    }));
+}
+
+fn rewrite_session_at(path: &std::path::Path, lines: Vec<String>, modified: std::time::SystemTime) {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+    file.write_all(lines.join("\n").as_bytes()).unwrap();
+    file.set_times(FileTimes::new().set_modified(modified))
+        .unwrap();
+}
+
+fn single_call_lines(
+    now: chrono::DateTime<Utc>,
+    source_id: &str,
+    output_tokens: i64,
+) -> Vec<String> {
+    vec![
+        line(
+            now - Duration::seconds(10),
+            "session_meta",
+            serde_json::json!({"id": source_id, "cwd": "C:\\Projects\\Inference"}),
+        ),
+        turn_context(now, "turn-cache", "gpt-5", Some("high")),
+        assistant_output(now + Duration::seconds(1)),
+        token_count(now + Duration::seconds(4), "turn-cache", output_tokens, 10),
+    ]
+}
+
+fn single_group_output_tokens(history: &codexu_core::InferencePerformanceHistory) -> i64 {
+    history
+        .today
+        .as_ref()
+        .expect("today")
+        .groups
+        .first()
+        .expect("group")
+        .output_tokens
+}
+
+#[tokio::test]
+async fn rollout_cache_hits_and_invalidates_by_size_mtime_and_parser_schema() {
+    let temp = tempdir().unwrap();
+    let archived = temp.path().join("archived_sessions");
+    let cache = temp.path().join("cache");
+    std::fs::create_dir_all(&archived).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 5, 14, 0, 0).unwrap();
+    let session = archived.join("rollout-cache.jsonl");
+    write_session(&session, single_call_lines(now, "cache-thread", 40));
+    let original_metadata = std::fs::metadata(&session).unwrap();
+    let original_size = original_metadata.len();
+    let original_modified = original_metadata.modified().unwrap();
+
+    let reader = InferencePerformanceReader::new(&cache);
+    let first_started = Instant::now();
+    let first = reader.load(temp.path(), now).await.unwrap().expect("first");
+    let first_elapsed = first_started.elapsed();
+    assert_eq!(single_group_output_tokens(&first), 40);
+
+    rewrite_session_at(
+        &session,
+        single_call_lines(now, "cache-thread", 90),
+        original_modified,
+    );
+    assert_eq!(std::fs::metadata(&session).unwrap().len(), original_size);
+    let cached_started = Instant::now();
+    let cached = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("cached");
+    let cached_elapsed = cached_started.elapsed();
+    assert_eq!(
+        single_group_output_tokens(&cached),
+        40,
+        "unchanged path, size, and mtime must reuse the cached parse"
+    );
+
+    let cache_file = cache.join("codex").join("inference-performance-v1.json");
+    let cache_bytes = std::fs::read(&cache_file).unwrap();
+    let cache_json: serde_json::Value = serde_json::from_slice(&cache_bytes).unwrap();
+    let entries = cache_json["entries"].as_object().expect("cache entries");
+    assert_eq!(entries.len(), 1);
+    let (cache_key, entry) = entries.iter().next().expect("cache entry");
+    assert!(cache_key.starts_with("rollout-"));
+    assert!(
+        !String::from_utf8_lossy(&cache_bytes).contains(session.to_string_lossy().as_ref()),
+        "the persisted cache must not contain the rollout path"
+    );
+    assert_eq!(entry["file_size"], original_size);
+    assert!(entry["modification_time_ns"].as_i64().is_some());
+    assert_eq!(entry["parser_version"], 1);
+
+    rewrite_session_at(
+        &session,
+        single_call_lines(now, "cache-thread", 100),
+        original_modified,
+    );
+    let size_changed = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("size changed");
+    assert_eq!(single_group_output_tokens(&size_changed), 100);
+
+    let newer_modified = original_modified + StdDuration::from_secs(60);
+    rewrite_session_at(
+        &session,
+        single_call_lines(now, "cache-thread", 200),
+        newer_modified,
+    );
+    let mtime_changed = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("mtime changed");
+    assert_eq!(single_group_output_tokens(&mtime_changed), 200);
+
+    let mut cache_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cache_file).unwrap()).unwrap();
+    cache_json["entries"][cache_key]["parser_version"] = serde_json::json!(0);
+    std::fs::write(&cache_file, serde_json::to_vec(&cache_json).unwrap()).unwrap();
+    rewrite_session_at(
+        &session,
+        single_call_lines(now, "cache-thread", 300),
+        newer_modified,
+    );
+    let schema_changed = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("schema changed");
+    assert_eq!(single_group_output_tokens(&schema_changed), 300);
+
+    eprintln!(
+        "representative_cache_fixture first_ms={} cached_ms={}",
+        first_elapsed.as_millis(),
+        cached_elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn live_and_archive_rollout_caches_invalidate_independently() {
+    let temp = tempdir().unwrap();
+    let archived = temp.path().join("archived_sessions");
+    let sessions = temp.path().join("sessions");
+    let cache = temp.path().join("cache");
+    std::fs::create_dir_all(&archived).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 5, 14, 30, 0).unwrap();
+    let archive_rollout = archived.join("rollout-archive-cache.jsonl");
+    let live_rollout = sessions.join("rollout-live-cache.jsonl");
+    write_session(
+        &archive_rollout,
+        single_call_lines(now, "archive-thread", 40),
+    );
+    write_session(&live_rollout, single_call_lines(now, "live-thread", 60));
+    let archive_modified = std::fs::metadata(&archive_rollout)
+        .unwrap()
+        .modified()
+        .unwrap();
+    let live_modified = std::fs::metadata(&live_rollout)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let reader = InferencePerformanceReader::new(&cache);
+    let first = reader.load(temp.path(), now).await.unwrap().expect("first");
+    assert_eq!(single_group_output_tokens(&first), 100);
+    assert_eq!(first.today.as_ref().unwrap().total_call_count, 2);
+
+    rewrite_session_at(
+        &archive_rollout,
+        single_call_lines(now, "archive-thread", 70),
+        archive_modified,
+    );
+    rewrite_session_at(
+        &live_rollout,
+        single_call_lines(now, "live-thread", 80),
+        live_modified,
+    );
+    let both_cached = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("both cached");
+    assert_eq!(
+        single_group_output_tokens(&both_cached),
+        100,
+        "unchanged live and archive fingerprints must both hit cache"
+    );
+
+    rewrite_session_at(
+        &live_rollout,
+        single_call_lines(now, "live-thread", 80),
+        live_modified + StdDuration::from_secs(60),
+    );
+    let live_changed = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("live changed");
+    assert_eq!(
+        single_group_output_tokens(&live_changed),
+        120,
+        "only the changed live rollout should be reparsed"
+    );
+
+    rewrite_session_at(
+        &archive_rollout,
+        single_call_lines(now, "archive-thread", 70),
+        archive_modified + StdDuration::from_secs(60),
+    );
+    let archive_changed = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("archive changed");
+    assert_eq!(
+        single_group_output_tokens(&archive_changed),
+        150,
+        "only the changed archive rollout should be reparsed"
+    );
 }
 
 #[tokio::test]
@@ -401,13 +897,14 @@ async fn archive_disk_load_save_and_safe_degradation() {
         "effort": "high",
     });
     let valid_cache = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "archive": {
             "recording_started_at": now.timestamp_millis(),
             "samples_by_source_id": {
                 "stable-thread-id": [sample],
             }
-        }
+        },
+        "entries": {}
     });
     std::fs::write(&cache_file, serde_json::to_vec(&valid_cache).unwrap()).unwrap();
 
@@ -420,7 +917,7 @@ async fn archive_disk_load_save_and_safe_degradation() {
     assert_eq!(loaded.today.as_ref().unwrap().total_call_count, 1);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&cache_file).unwrap()).unwrap();
-    assert_eq!(saved["version"], 1);
+    assert_eq!(saved["version"], 2);
 
     std::fs::write(&cache_file, b"not-json").unwrap();
     assert!(
@@ -435,7 +932,8 @@ async fn archive_disk_load_save_and_safe_degradation() {
             "samples_by_source_id": {
                 "stable-thread-id": [sample],
             }
-        }
+        },
+        "entries": {}
     });
     std::fs::write(&cache_file, serde_json::to_vec(&version_mismatch).unwrap()).unwrap();
     assert!(
