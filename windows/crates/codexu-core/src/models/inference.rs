@@ -182,9 +182,6 @@ impl InferencePerformanceArchive {
             samples.sort_by_key(|sample| sample.completed_at);
         }
         self.samples_by_source_id = grouped;
-        if let Some(earliest) = self.samples().first().map(|sample| sample.completed_at) {
-            self.recording_started_at = earliest;
-        }
     }
 }
 

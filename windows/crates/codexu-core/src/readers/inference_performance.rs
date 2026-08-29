@@ -341,14 +341,12 @@ fn apply_inference_line(
     let turn_id = string_value(payload.get("turn_id"));
     let sample_id = token_event_sample_id(turn_id.as_deref(), timestamp);
 
-    let Some(info) = payload.get("info") else {
-        return;
-    };
-    let Some(last_usage) = info.get("last_token_usage").and_then(parse_usage) else {
-        return;
-    };
+    let last_usage = payload
+        .get("info")
+        .and_then(|info| info.get("last_token_usage"))
+        .and_then(parse_usage);
 
-    if let Some(sample) = tracker.consume_token_event(timestamp, sample_id, &last_usage) {
+    if let Some(sample) = tracker.consume_token_event(timestamp, sample_id, last_usage.as_ref()) {
         if seen_sample_ids.insert(sample.sample_id.clone()) {
             parsed.samples.push(sample);
         }
@@ -399,7 +397,7 @@ impl InferenceCallTracker {
         &mut self,
         completed_at: DateTime<Utc>,
         sample_id: String,
-        last_usage: &TokenBreakdown,
+        last_usage: Option<&TokenBreakdown>,
     ) -> Option<InferencePerformanceSample> {
         let result = self.consume_token_event_inner(completed_at, sample_id, last_usage);
         self.call_started_at = Some(completed_at);
@@ -411,8 +409,9 @@ impl InferenceCallTracker {
         &self,
         completed_at: DateTime<Utc>,
         sample_id: String,
-        last_usage: &TokenBreakdown,
+        last_usage: Option<&TokenBreakdown>,
     ) -> Option<InferencePerformanceSample> {
+        let last_usage = last_usage?;
         let model = self.active_model.as_ref()?;
         let effort = self.active_effort.as_ref()?;
         let started_at = self.call_started_at?;

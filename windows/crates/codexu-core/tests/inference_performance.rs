@@ -1,8 +1,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use codexu_core::{
     readers::{CodexDashboardProvider, InferencePerformanceReader},
-    InferencePerformanceArchive, InferencePerformancePeriod, InferencePerformanceSample,
-    StatisticsTimeZone,
+    InferencePerformanceArchive, InferencePerformanceBuilder, InferencePerformancePeriod,
+    InferencePerformanceSample, StatisticsTimeZone,
 };
 use std::fs::{FileTimes, OpenOptions};
 use std::io::Write;
@@ -1166,6 +1166,61 @@ async fn ignores_token_events_with_missing_info_last_usage_or_required_numeric_f
     assert_eq!(today.groups.first().unwrap().output_tokens, 40);
 }
 
+#[tokio::test]
+async fn invalid_token_event_advances_boundary_before_a_followup_response() {
+    let temp = tempdir().unwrap();
+    let archived = temp.path().join("archived_sessions");
+    std::fs::create_dir_all(&archived).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 5, 18, 0, 0).unwrap();
+    let session = archived.join("rollout-invalid-boundary.jsonl");
+    write_session(
+        &session,
+        vec![
+            line(
+                now - Duration::seconds(10),
+                "session_meta",
+                serde_json::json!({"id": "thread-invalid-boundary", "cwd": "C:\\Projects\\Inference"}),
+            ),
+            turn_context(now, "turn-invalid-boundary", "gpt-5", Some("high")),
+            assistant_output(now + Duration::seconds(1)),
+            token_count_with_info(
+                now + Duration::seconds(3),
+                "turn-invalid-boundary",
+                serde_json::json!({
+                    "total_token_usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 5,
+                        "total_tokens": 120
+                    }
+                }),
+            ),
+            assistant_output(now + Duration::milliseconds(3_010)),
+            token_count(
+                now + Duration::milliseconds(3_050),
+                "turn-invalid-boundary",
+                40,
+                10,
+            ),
+        ],
+    );
+
+    let provider = CodexDashboardProvider::new(temp.path(), temp.path().join("cache"));
+    let snapshot = provider
+        .load_dashboard_snapshot(now + Duration::minutes(1))
+        .await
+        .unwrap()
+        .expect("snapshot");
+    let local = snapshot.codex.snapshot.local.as_ref().expect("local usage");
+
+    assert!(
+        local.inference_performance.is_none(),
+        "the invalid token event must advance the boundary so a 40ms followup cannot inherit the earlier call duration"
+    );
+}
+
 #[test]
 fn inference_archive_deduplicates_and_bounds_retention() {
     let base = Utc.with_ymd_and_hms(2026, 8, 5, 12, 0, 0).unwrap();
@@ -1211,4 +1266,39 @@ fn inference_archive_deduplicates_and_bounds_retention() {
         "b",
         "newest sample is retained first"
     );
+}
+
+#[test]
+fn inference_archive_compaction_preserves_recording_coverage_across_idle_days() {
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap();
+    let recording_started_at = Utc.with_ymd_and_hms(2026, 8, 1, 12, 0, 0).unwrap();
+    let retention_start = Utc.with_ymd_and_hms(2026, 8, 2, 0, 0, 0).unwrap();
+    let mut archive = InferencePerformanceArchive::new(recording_started_at);
+    archive.replace_samples(
+        "rollout-idle-gap",
+        vec![InferencePerformanceSample {
+            sample_id: "idle-gap-sample".to_string(),
+            completed_at: Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap(),
+            duration_seconds: 3.0,
+            output_tokens: 30,
+            reasoning_output_tokens: 5,
+            model: "gpt-5".to_string(),
+            effort: "high".to_string(),
+        }],
+        retention_start,
+    );
+
+    archive.compact(retention_start, 50_000);
+
+    assert_eq!(archive.recording_started_at, recording_started_at);
+    let history = InferencePerformanceBuilder::make_history(
+        &archive.samples(),
+        archive.recording_started_at,
+        now,
+        StatisticsTimeZone::Named(chrono_tz::UTC),
+    )
+    .expect("history");
+    let period = history.twenty_eight_days.expect("twenty-eight days");
+    assert_eq!(period.coverage_day_count, 28);
+    assert!((period.groups[0].average_daily_call_count - (1.0 / 28.0)).abs() < 1e-12);
 }
