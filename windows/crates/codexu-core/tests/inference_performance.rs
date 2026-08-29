@@ -18,12 +18,23 @@ fn line(
     envelope_type: &str,
     payload: serde_json::Value,
 ) -> String {
-    serde_json::json!({
-        "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    let timestamp = timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    line_with_raw_timestamp(Some(&timestamp), envelope_type, payload)
+}
+
+fn line_with_raw_timestamp(
+    timestamp: Option<&str>,
+    envelope_type: &str,
+    payload: serde_json::Value,
+) -> String {
+    let mut object = serde_json::json!({
         "type": envelope_type,
         "payload": payload,
-    })
-    .to_string()
+    });
+    if let Some(timestamp) = timestamp {
+        object["timestamp"] = serde_json::json!(timestamp);
+    }
+    object.to_string()
 }
 
 fn turn_context(
@@ -73,27 +84,35 @@ fn token_count(
     line(
         timestamp,
         "event_msg",
-        serde_json::json!({
-            "type": "token_count",
-            "turn_id": turn_id,
-            "info": {
-                "last_token_usage": {
-                    "input_tokens": 100,
-                    "cached_input_tokens": 0,
-                    "output_tokens": output_tokens,
-                    "reasoning_output_tokens": reasoning_output_tokens,
-                    "total_tokens": 100 + output_tokens
-                },
-                "total_token_usage": {
-                    "input_tokens": 100,
-                    "cached_input_tokens": 0,
-                    "output_tokens": output_tokens,
-                    "reasoning_output_tokens": reasoning_output_tokens,
-                    "total_tokens": 100 + output_tokens
-                }
-            }
-        }),
+        token_count_payload(turn_id, output_tokens, reasoning_output_tokens),
     )
+}
+
+fn token_count_payload(
+    turn_id: &str,
+    output_tokens: i64,
+    reasoning_output_tokens: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "token_count",
+        "turn_id": turn_id,
+        "info": {
+            "last_token_usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 0,
+                "output_tokens": output_tokens,
+                "reasoning_output_tokens": reasoning_output_tokens,
+                "total_tokens": 100 + output_tokens
+            },
+            "total_token_usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 0,
+                "output_tokens": output_tokens,
+                "reasoning_output_tokens": reasoning_output_tokens,
+                "total_tokens": 100 + output_tokens
+            }
+        }
+    })
 }
 
 fn token_count_with_info(
@@ -483,7 +502,7 @@ async fn rollout_cache_hits_and_invalidates_by_size_mtime_and_parser_schema() {
     );
     assert_eq!(entry["file_size"], original_size);
     assert!(entry["modification_time_ns"].as_i64().is_some());
-    assert_eq!(entry["parser_version"], 1);
+    assert_eq!(entry["parser_version"], 2);
 
     rewrite_session_at(
         &session,
@@ -946,6 +965,117 @@ async fn archive_disk_load_save_and_safe_degradation() {
         reader.load(temp.path(), now).await.unwrap().is_none(),
         "oversized archive must safely degrade to empty data"
     );
+}
+
+#[tokio::test]
+async fn ignores_inference_events_with_missing_invalid_or_payload_only_timestamps() {
+    let temp = tempdir().unwrap();
+    let archived = temp.path().join("archived_sessions");
+    std::fs::create_dir_all(&archived).unwrap();
+
+    let now = Utc::now();
+    let session = archived.join("rollout-invalid-inference-timestamps.jsonl");
+    let mut payload_timestamp_only = token_count_payload("turn-payload-time", 30, 3);
+    payload_timestamp_only["timestamp"] = serde_json::json!(
+        (now - Duration::seconds(28)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    );
+
+    write_session(
+        &session,
+        vec![
+            line_with_raw_timestamp(
+                None,
+                "session_meta",
+                serde_json::json!({"id": "thread-invalid-inference-timestamps"}),
+            ),
+            turn_context(
+                now - Duration::seconds(50),
+                "turn-missing-time",
+                "gpt-5",
+                Some("high"),
+            ),
+            assistant_output(now - Duration::seconds(49)),
+            line_with_raw_timestamp(
+                None,
+                "event_msg",
+                token_count_payload("turn-missing-time", 10, 1),
+            ),
+            turn_context(
+                now - Duration::seconds(40),
+                "turn-invalid-time",
+                "gpt-5",
+                Some("high"),
+            ),
+            assistant_output(now - Duration::seconds(39)),
+            line_with_raw_timestamp(
+                Some("not-a-timestamp"),
+                "event_msg",
+                token_count_payload("turn-invalid-time", 20, 2),
+            ),
+            turn_context(
+                now - Duration::seconds(30),
+                "turn-payload-time",
+                "gpt-5",
+                Some("high"),
+            ),
+            assistant_output(now - Duration::seconds(29)),
+            line_with_raw_timestamp(None, "event_msg", payload_timestamp_only),
+            turn_context(
+                now - Duration::seconds(20),
+                "turn-missing-output-time",
+                "gpt-5",
+                Some("high"),
+            ),
+            line_with_raw_timestamp(
+                None,
+                "response_item",
+                serde_json::json!({"type": "agent_message", "role": "assistant"}),
+            ),
+            token_count(
+                now - Duration::seconds(17),
+                "turn-missing-output-time",
+                40,
+                4,
+            ),
+            turn_context(
+                now - Duration::seconds(12),
+                "turn-invalid-boundary-time",
+                "gpt-5",
+                Some("high"),
+            ),
+            assistant_output(now - Duration::seconds(11)),
+            line_with_raw_timestamp(
+                Some("still-not-a-timestamp"),
+                "response_item",
+                serde_json::json!({"type": "function_call_output"}),
+            ),
+            assistant_output(now - Duration::seconds(9)),
+            token_count(
+                now - Duration::seconds(8),
+                "turn-invalid-boundary-time",
+                50,
+                5,
+            ),
+            turn_context(
+                now - Duration::seconds(4),
+                "turn-valid",
+                "gpt-5",
+                Some("high"),
+            ),
+            assistant_output(now - Duration::seconds(3)),
+            token_count(now - Duration::seconds(1), "turn-valid", 60, 6),
+        ],
+    );
+
+    let reader = InferencePerformanceReader::new(temp.path().join("cache"));
+    let history = reader
+        .load(temp.path(), now)
+        .await
+        .unwrap()
+        .expect("the final valid inference call should remain");
+    let today = history.today.as_ref().expect("today");
+    assert_eq!(today.total_call_count, 1);
+    assert_eq!(today.groups.first().unwrap().output_tokens, 60);
 }
 
 #[tokio::test]

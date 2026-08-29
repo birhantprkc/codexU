@@ -19,6 +19,9 @@ const OUTLIER_COMPRESSION_RATIO = 1.6;
 const OUTLIER_Y_OFFSET = 24;
 const OUTLIER_LANE_HEIGHT = 44;
 const OUTLIER_REGULAR_TOP_OFFSET = 64;
+const MODEL_COLOR_SLOT_COUNT = 9;
+const FNV_OFFSET_BASIS_64 = BigInt('14695981039346656037');
+const FNV_PRIME_64 = BigInt('1099511628211');
 
 interface InferencePerformancePanelProps {
   inference: InferencePerformanceHistory | null;
@@ -257,12 +260,12 @@ function InferenceScatterPlot({ period }: { period: InferencePerformancePeriod }
             tok/s
           </text>
 
-          {groups.map((group, index) => {
+          {groups.map((group) => {
             const medianX = x(group.p50_duration_seconds);
             const p90X = x(group.p90_duration_seconds);
             const pointY = y(group);
             const radius = 5 + Math.sqrt(bubbleBasis(group, period) / maxBubble) * 11;
-            const color = `var(--data-series-${(index % 3) + 1})`;
+            const color = modelColor(group.model);
             const label = `${group.model} · ${formatEffort(group.effort)}`;
             const isOutlier = group.id === throughputScale.outlierId;
             const labelReserve = isOutlier ? 156 : 130;
@@ -386,6 +389,19 @@ function InferenceScatterPlot({ period }: { period: InferencePerformancePeriod }
 
 function bubbleBasis(group: InferencePerformanceGroup, period: InferencePerformancePeriod): number {
   return period.period === 'today' ? group.call_count : group.average_daily_call_count;
+}
+
+function modelColor(model: string): string {
+  return `var(--data-model-${stableModelColorSlot(model) + 1})`;
+}
+
+function stableModelColorSlot(model: string): number {
+  let hash = FNV_OFFSET_BASIS_64;
+  for (const byte of new TextEncoder().encode(model)) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * FNV_PRIME_64);
+  }
+  return Number(hash % BigInt(MODEL_COLOR_SLOT_COUNT));
 }
 
 function resolveThroughputScale(groups: InferencePerformanceGroup[]): { outlierId: string | null; regularMax: number } {

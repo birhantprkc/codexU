@@ -68,10 +68,40 @@ test('shows the outlier value and axis break without overflow copy', async ({ pa
   await panel.screenshot({ path: screenshotPath });
 });
 
+test('keeps model palette colors stable across effort groups and period sorting', async ({ page }) => {
+  await page.addInitScript((data) => {
+    window.__CODEXU_VISUAL_DATA__ = data;
+  }, createStableModelColorFixture());
+  await page.goto('/visual-test.html?surface=inference');
+
+  const tab = page.getByRole('tab', { name: 'Inference performance', exact: true });
+  await tab.click();
+  const panel = page.locator('#dashboard-home-panel-inference');
+  const chart = panel.locator('.inference-scatter');
+  const solHigh = chart.locator('[data-inference-group-id="sol-high"] circle.inference-bubble');
+  const solLow = chart.locator('[data-inference-group-id="sol-low"] circle.inference-bubble');
+  const todayHighColor = await inlineFill(solHigh);
+  const todayLowColor = await inlineFill(solLow);
+
+  expect(todayHighColor).toMatch(/^var\(--data-model-[1-9]\)$/);
+  expect(todayLowColor).toBe(todayHighColor);
+
+  const sevenDayTab = panel.locator('.inference-period-switcher [role="tab"]').nth(1);
+  await sevenDayTab.click();
+  await expect(sevenDayTab).toHaveAttribute('aria-selected', 'true');
+  await expect(chart.locator('[data-inference-group-id="sol-low"]')).toBeVisible();
+  expect(await inlineFill(solHigh)).toBe(todayHighColor);
+  expect(await inlineFill(solLow)).toBe(todayHighColor);
+});
+
 async function numericAttribute(locator, name) {
   const value = await locator.getAttribute(name);
   expect(value).not.toBeNull();
   return Number(value);
+}
+
+async function inlineFill(locator) {
+  return locator.evaluate((element) => element.style.fill);
 }
 
 function createInferenceFixture() {
@@ -152,6 +182,34 @@ function createInferenceFixture() {
       app_data_dir: '<fixture codexU app data>',
     },
     source: { mode: 'live-readonly', provider: 'codex-dashboard' },
+  };
+}
+
+function createStableModelColorFixture() {
+  const fixture = createInferenceFixture();
+  const inference = fixture.dashboard.codex.snapshot.local.inference_performance;
+  const todayGroups = [
+    inferenceGroup('sol-high', 'gpt-5.6-sol', 'high', 60, 12, 20, 40),
+    inferenceGroup('luna-medium', 'gpt-5.6-luna', 'medium', 35, 7, 12, 20),
+    inferenceGroup('sol-low', 'gpt-5.6-sol', 'low', 25, 5, 9, 5),
+  ];
+  const sevenDayGroups = [
+    inferenceGroup('sol-high', 'gpt-5.6-sol', 'high', 60, 12, 20, 4),
+    inferenceGroup('luna-medium', 'gpt-5.6-luna', 'medium', 35, 7, 12, 20),
+    inferenceGroup('sol-low', 'gpt-5.6-sol', 'low', 25, 5, 9, 50),
+  ];
+  inference.today = inferencePeriod('today', 1, todayGroups);
+  inference.seven_days = inferencePeriod('seven_days', 7, sevenDayGroups);
+  inference.twenty_eight_days = inferencePeriod('twenty_eight_days', 28, sevenDayGroups);
+  return fixture;
+}
+
+function inferencePeriod(period, coverageDayCount, groups) {
+  return {
+    period,
+    coverage_day_count: coverageDayCount,
+    groups,
+    total_call_count: groups.reduce((total, group) => total + group.call_count, 0),
   };
 }
 

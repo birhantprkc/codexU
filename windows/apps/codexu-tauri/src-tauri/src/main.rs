@@ -82,7 +82,7 @@ fn show_background_capture_window(window: &tauri::WebviewWindow) {
         fn ShowWindow(hwnd: *mut c_void, command: i32) -> i32;
     }
 
-    const HWND_BOTTOM: isize = -2;
+    const HWND_BOTTOM: isize = 1;
     const SW_SHOWNOACTIVATE: i32 = 4;
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;

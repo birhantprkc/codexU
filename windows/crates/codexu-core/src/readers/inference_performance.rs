@@ -16,7 +16,7 @@ use crate::models::{
 use crate::StatisticsTimeZone;
 
 const INFERENCE_CACHE_VERSION: i32 = 2;
-const INFERENCE_PARSER_VERSION: i32 = 1;
+const INFERENCE_PARSER_VERSION: i32 = 2;
 const MAXIMUM_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 const MAXIMUM_SAMPLE_COUNT: usize = 50_000;
 
@@ -285,11 +285,8 @@ fn apply_inference_line(
         return;
     }
 
-    let timestamp = date_value(object.get("timestamp"))
-        .or_else(|| date_value(payload.get("timestamp")))
-        .unwrap_or_else(Utc::now);
-
-    if object.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+    let object_type = object.get("type").and_then(|value| value.as_str());
+    if object_type == Some("session_meta") {
         if parsed.source_id.is_none() {
             parsed.source_id = string_value(payload.get("id"))
                 .and_then(|id| normalize(Some(id)))
@@ -298,7 +295,28 @@ fn apply_inference_line(
         return;
     }
 
-    if object.get("type").and_then(|v| v.as_str()) == Some("turn_context") {
+    let payload_type = string_value(payload.get("type"));
+    let payload_type = payload_type.as_deref();
+    let is_turn_context = object_type == Some("turn_context");
+    let is_model_output = payload_type
+        .map(|value| MODEL_OUTPUT_PAYLOAD_TYPES.contains(&value))
+        .unwrap_or(false)
+        || string_value(payload.get("role")).as_deref() == Some("assistant");
+    let is_input_boundary = payload_type
+        .map(|value| INPUT_BOUNDARY_PAYLOAD_TYPES.contains(&value))
+        .unwrap_or(false);
+    let is_token_count = payload_type == Some("token_count");
+
+    if !is_turn_context && !is_model_output && !is_input_boundary && !is_token_count {
+        return;
+    }
+
+    let Some(timestamp) = date_value(object.get("timestamp")) else {
+        tracker.discard_active_call();
+        return;
+    };
+
+    if is_turn_context {
         tracker.apply_turn_context(
             string_value(payload.get("model")),
             string_value(payload.get("effort")),
@@ -307,26 +325,16 @@ fn apply_inference_line(
         return;
     }
 
-    let payload_type = string_value(payload.get("type"));
-    let payload_type = payload_type.as_deref();
-
-    if payload_type
-        .map(|value| MODEL_OUTPUT_PAYLOAD_TYPES.contains(&value))
-        .unwrap_or(false)
-        || string_value(payload.get("role")).as_deref() == Some("assistant")
-    {
+    if is_model_output {
         tracker.observe_model_output();
     }
 
-    if payload_type
-        .map(|value| INPUT_BOUNDARY_PAYLOAD_TYPES.contains(&value))
-        .unwrap_or(false)
-    {
+    if is_input_boundary {
         tracker.apply_input_boundary(timestamp);
         return;
     }
 
-    if payload_type != Some("token_count") {
+    if !is_token_count {
         return;
     }
 
@@ -356,6 +364,10 @@ struct InferenceCallTracker {
 }
 
 impl InferenceCallTracker {
+    fn discard_active_call(&mut self) {
+        *self = Self::default();
+    }
+
     fn apply_turn_context(
         &mut self,
         model: Option<String>,

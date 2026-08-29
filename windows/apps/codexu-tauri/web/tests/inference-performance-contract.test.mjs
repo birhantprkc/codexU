@@ -43,6 +43,10 @@ test('exposes inference performance as an independent Dashboard branch after Usa
   assert.match(panel, /onKeyDown=/);
   assert.match(panel, /average_duration_seconds/);
   assert.match(panel, /output_tokens/);
+  assert.match(panel, /modelColor\(group\.model\)/);
+  assert.match(panel, /stableModelColorSlot\(model\)/);
+  assert.match(panel, /var\(--data-model-/);
+  assert.doesNotMatch(panel, /index\s*%\s*3|var\(--data-series-/);
   assert.doesNotMatch(panel, /<title>/);
   assert.doesNotMatch(panel, /prompt|reply|raw|arguments/i);
 

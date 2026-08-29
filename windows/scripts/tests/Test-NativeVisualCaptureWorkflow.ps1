@@ -37,6 +37,9 @@ Assert-True (-not [bool]$mainWindow.focus) 'The main window must not request foc
 $mainSourceText = Get-Content -LiteralPath $mainSource -Raw -Encoding UTF8
 $entryText = Get-Content -LiteralPath $entry -Raw -Encoding UTF8
 Assert-True (
+  $mainSourceText -match 'const\s+HWND_BOTTOM:\s*isize\s*=\s*1\s*;'
+) 'Background startup must use the Win32 HWND_BOTTOM value 1, not HWND_NOTOPMOST (-2).'
+Assert-True (
   $mainSourceText -match '(?s)if background_capture.*?prepare_background_capture_window\(\&window\).*?show_background_capture_window\(\&window\).*?else.*?window\.show\(\).*?window\.set_focus\(\)'
 ) 'Startup must use the native non-activating show path for capture, while only normal startup requests focus.'
 Assert-True (
