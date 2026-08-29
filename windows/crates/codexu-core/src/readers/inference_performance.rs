@@ -341,10 +341,17 @@ fn apply_inference_line(
     let turn_id = string_value(payload.get("turn_id"));
     let sample_id = token_event_sample_id(turn_id.as_deref(), timestamp);
 
-    let last_usage = payload
-        .get("info")
+    let info = payload.get("info");
+    let cumulative_usage = info
+        .and_then(|info| info.get("total_token_usage"))
+        .and_then(parse_usage);
+    let last_usage = info
         .and_then(|info| info.get("last_token_usage"))
         .and_then(parse_usage);
+
+    if cumulative_usage.is_none() && last_usage.is_none() {
+        return;
+    }
 
     if let Some(sample) = tracker.consume_token_event(timestamp, sample_id, last_usage.as_ref()) {
         if seen_sample_ids.insert(sample.sample_id.clone()) {

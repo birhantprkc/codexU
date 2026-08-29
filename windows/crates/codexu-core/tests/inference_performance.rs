@@ -1167,7 +1167,7 @@ async fn ignores_token_events_with_missing_info_last_usage_or_required_numeric_f
 }
 
 #[tokio::test]
-async fn invalid_token_event_advances_boundary_before_a_followup_response() {
+async fn cumulative_only_token_event_advances_boundary_before_a_followup_response() {
     let temp = tempdir().unwrap();
     let archived = temp.path().join("archived_sessions");
     std::fs::create_dir_all(&archived).unwrap();
@@ -1217,7 +1217,55 @@ async fn invalid_token_event_advances_boundary_before_a_followup_response() {
 
     assert!(
         local.inference_performance.is_none(),
-        "the invalid token event must advance the boundary so a 40ms followup cannot inherit the earlier call duration"
+        "the cumulative-only token event must advance the boundary so a 40ms followup cannot inherit the earlier call duration"
+    );
+}
+
+#[tokio::test]
+async fn data_less_token_event_does_not_shift_the_next_call_start() {
+    let temp = tempdir().unwrap();
+    let archived = temp.path().join("archived_sessions");
+    std::fs::create_dir_all(&archived).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 5, 18, 0, 0).unwrap();
+    let session = archived.join("rollout-data-less-boundary.jsonl");
+    write_session(
+        &session,
+        vec![
+            line(
+                now - Duration::seconds(10),
+                "session_meta",
+                serde_json::json!({"id": "thread-data-less-boundary", "cwd": "C:\\Projects\\Inference"}),
+            ),
+            turn_context(now, "turn-data-less-boundary", "gpt-5", Some("high")),
+            token_count_with_info(
+                now + Duration::seconds(2),
+                "turn-data-less-boundary",
+                serde_json::Value::Null,
+            ),
+            assistant_output(now + Duration::seconds(3)),
+            token_count(
+                now + Duration::seconds(5),
+                "turn-data-less-boundary",
+                40,
+                10,
+            ),
+        ],
+    );
+
+    let provider = CodexDashboardProvider::new(temp.path(), temp.path().join("cache"));
+    let snapshot = provider
+        .load_dashboard_snapshot(now + Duration::minutes(1))
+        .await
+        .unwrap()
+        .expect("snapshot");
+    let today = inference_history(&snapshot).today.as_ref().expect("today");
+
+    assert_eq!(today.total_call_count, 1);
+    let group = today.groups.first().expect("inference group");
+    assert!(
+        (group.average_duration_seconds - 5.0).abs() < 0.000_1,
+        "a token event without valid usage data must not reset the active call boundary"
     );
 }
 

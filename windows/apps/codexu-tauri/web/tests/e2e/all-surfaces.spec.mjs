@@ -89,6 +89,29 @@ test('captures the fixed eight Web surfaces with deterministic visual data', asy
 
   assert.equal(observations.length, selectedSurfaces.length);
   assert.deepEqual(observations.map((item) => item.surface), selectedSurfaces.map((item) => item.id));
+  if (visualData.source.mode === 'fixture') {
+    assert.deepEqual(
+      observations.map((item) => item.result),
+      selectedSurfaces.map(() => 'PASS'),
+      'every deterministic fixture surface must be observed as populated',
+    );
+  }
+});
+
+test('classifies a tools-only Skills surface as populated', async ({ page }) => {
+  const visualData = createVisualFixture();
+  visualData.dashboard.codex.snapshot.local.skill_usages = [];
+  assert.ok(visualData.dashboard.codex.snapshot.local.tool_usages.length > 0);
+
+  await page.addInitScript((data) => {
+    window.__CODEXU_VISUAL_DATA__ = data;
+  }, visualData);
+  await page.goto('/visual-test.html?surface=skills');
+
+  const surface = SURFACES.find((item) => item.id === 'skills');
+  const focused = await enterSurface(page, surface);
+  await expect(focused).toBeVisible();
+  await expect.poll(() => observeDataState(page, surface, visualData.dashboard)).toBe('populated');
 });
 
 function selectSurfaces(surfaces, requestedSurface) {
@@ -179,7 +202,7 @@ function hasLiveDataForSurface(surface, dashboard) {
     return Object.values(local.inference_performance ?? {}).some((period) => period?.groups?.length > 0);
   }
   if (surface === 'projects') return (local.project_board?.all_projects.length ?? 0) > 0;
-  if (surface === 'skills') return local.skill_usages.length > 0;
+  if (surface === 'skills') return local.skill_usages.length > 0 || local.tool_usages.length > 0;
   return false;
 }
 
@@ -192,6 +215,7 @@ function summarizeDashboard(dashboard) {
     task_count: snapshot.task_board?.columns.reduce((sum, column) => sum + column.items.length, 0) ?? 0,
     project_count: local?.project_board?.all_projects.length ?? 0,
     skill_count: local?.skill_usages.length ?? 0,
+    tool_count: local?.tool_usages.length ?? 0,
     has_usage_trend: Boolean(local?.usage_trend),
     has_inference_history: Boolean(local?.inference_performance),
     has_leadership_report: Boolean(dashboard.leadership.report),
