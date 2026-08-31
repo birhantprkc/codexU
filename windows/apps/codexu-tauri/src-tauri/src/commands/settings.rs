@@ -42,6 +42,7 @@ pub async fn open_settings_window(app: AppHandle) -> Result<(), String> {
     };
     apply_theme(&app, theme);
     let _ = window.show();
+    let _ = window.set_focus();
     Ok(())
 }
 

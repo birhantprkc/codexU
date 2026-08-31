@@ -3,6 +3,7 @@ import type { PricedTokenUsage, TokenBreakdown, LocalUsage } from '../types/mode
 import { TrendChart } from './TrendChart';
 import { UsageHeatmap } from './UsageHeatmap';
 import { useI18n } from '../i18n/I18nProvider';
+import { formatQuantity } from '../utils/formatQuantity';
 
 interface UsagePanelProps {
   usage: LocalUsage | null | undefined;
@@ -19,11 +20,9 @@ export function UsagePanel({ usage }: UsagePanelProps) {
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.12em] text-tertiary">{t('usage.title')}</p>
           <h2 className="mt-1 text-lg font-semibold text-primary">{t('usage.localTokenActivity')}</h2>
-          <p className="mt-1 text-sm text-secondary">{t('usage.localDetail')}</p>
         </div>
         <div className="usage-panel-source">
           <span className="usage-source-chip">{sourceQualityLabel(trend?.source_quality, t)}</span>
-          <span className="text-xs text-tertiary">{t('usage.notOfficial')}</span>
         </div>
       </div>
 
@@ -96,7 +95,7 @@ function UsageMetricCard({ label, icon: Icon, usage, fallbackTokens, accent, t }
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium text-secondary">{label}</p>
-          <p className="mt-1 text-2xl font-semibold text-primary tabular-nums">{formatTokens(value)}</p>
+          <p className="mt-1 text-2xl font-semibold text-primary tabular-nums">{formatQuantity(value)}</p>
         </div>
         <span className={`p-2 rounded-lg border border-current/20 ${accentClass}`} aria-hidden="true">
           <Icon size={17} />
@@ -127,7 +126,7 @@ function TokenBreakdownBar({ tokens, t }: { tokens: TokenBreakdown | null; t: Re
         <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-tertiary">
           {segments.map((segment) => (
             <span key={segment.label} className="min-w-0 truncate">
-              {segment.label} {formatTokens(segment.value)}
+              {segment.label} {formatQuantity(segment.value)}
             </span>
           ))}
         </div>
@@ -154,11 +153,6 @@ function splitTokenBreakdown(
 
 function visibleTotalTokens(tokens: TokenBreakdown): number {
   return Math.max(tokens.total_tokens, tokens.input_tokens + tokens.output_tokens);
-}
-
-function formatTokens(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '--';
-  return Math.round(value).toLocaleString();
 }
 
 function formatUSD(value: number): string {

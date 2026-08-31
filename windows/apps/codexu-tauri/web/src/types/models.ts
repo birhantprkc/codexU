@@ -20,6 +20,36 @@ export interface DetailedUsage {
   token_event_count: number;
 }
 
+export type InferencePerformancePeriodId = 'today' | 'sevenDays' | 'twentyEightDays';
+
+export interface InferencePerformanceGroup {
+  id: string;
+  model: string;
+  effort: string;
+  call_count: number;
+  average_daily_call_count: number;
+  average_duration_seconds: number;
+  p50_duration_seconds: number;
+  p90_duration_seconds: number;
+  effective_output_tokens_per_second: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+}
+
+export interface InferencePerformancePeriod {
+  period: InferencePerformancePeriodId;
+  coverage_day_count: number;
+  groups: InferencePerformanceGroup[];
+  total_call_count: number;
+}
+
+export interface InferencePerformanceHistory {
+  recording_started_at: number;
+  today: InferencePerformancePeriod | null;
+  seven_days: InferencePerformancePeriod | null;
+  twenty_eight_days: InferencePerformancePeriod | null;
+}
+
 export interface DailyTokenBucket {
   id: string;
   label: string;
@@ -237,6 +267,7 @@ export interface LocalUsage {
   recent_threads: LocalThread[];
   detailed_usage: DetailedUsage | null;
   usage_trend: UsageTrend | null;
+  inference_performance: InferencePerformanceHistory | null;
   project_board: ProjectBoard | null;
   tool_usages: ToolUsage[];
   skill_usages: SkillUsage[];

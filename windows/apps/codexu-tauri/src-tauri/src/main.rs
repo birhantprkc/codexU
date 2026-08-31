@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::Manager;
@@ -13,9 +14,28 @@ mod tray;
 use app_state::AppState;
 
 const BACKGROUND_CAPTURE_ARGUMENT: &str = "--codexu-native-capture-background";
+const CAPTURE_APP_DATA_DIR_ENV: &str = "CODEXU_CAPTURE_APP_DATA_DIR";
 
 fn is_background_capture() -> bool {
     std::env::args().any(|argument| argument == BACKGROUND_CAPTURE_ARGUMENT)
+}
+
+fn capture_app_data_dir() -> std::io::Result<PathBuf> {
+    let path = std::env::var_os(CAPTURE_APP_DATA_DIR_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{CAPTURE_APP_DATA_DIR_ENV} is required for native capture"),
+            )
+        })?;
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{CAPTURE_APP_DATA_DIR_ENV} must be an absolute path"),
+        ));
+    }
+    Ok(path)
 }
 
 #[cfg(windows)]
@@ -62,7 +82,7 @@ fn show_background_capture_window(window: &tauri::WebviewWindow) {
         fn ShowWindow(hwnd: *mut c_void, command: i32) -> i32;
     }
 
-    const HWND_BOTTOM: isize = -2;
+    const HWND_BOTTOM: isize = 1;
     const SW_SHOWNOACTIVATE: i32 = 4;
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
@@ -106,10 +126,15 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let app_data_dir = app.path().app_data_dir().map_err(|e| {
-                eprintln!("Failed to resolve app data dir: {}", e);
-                e
-            })?;
+            let background_capture = is_background_capture();
+            let app_data_dir = if background_capture {
+                capture_app_data_dir()?
+            } else {
+                app.path().app_data_dir().map_err(|e| {
+                    eprintln!("Failed to resolve app data dir: {}", e);
+                    e
+                })?
+            };
             info!("App data dir: {}", app_data_dir.display());
 
             let state = Arc::new(AppState::new(app_data_dir));
@@ -119,8 +144,6 @@ fn main() {
                 .map(|config| config.language.resolved(app_state::ResolvedLanguage::En))
                 .unwrap_or(app_state::ResolvedLanguage::En);
             app.manage(state.clone());
-
-            let background_capture = is_background_capture();
 
             // Hide main window to tray on close instead of quitting.
             if let Some(window) = app.get_webview_window("main") {
@@ -161,6 +184,6 @@ fn main() {
 }
 
 #[tauri::command]
-fn tray_show_main_window(app: tauri::AppHandle) {
-    tray::show_main_window(&app);
+fn tray_show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    tray::show_main_window(&app)
 }

@@ -157,47 +157,55 @@ impl CodexTranscriptReader {
         }))
     }
 
+    pub(crate) async fn load_dashboard_inputs_from_index(
+        &self,
+        index: &[CodexRolloutIndexEntry],
+        metadata: HashMap<String, CodexThreadMetadata>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<(Option<LocalUsage>, Option<Vec<SessionSummary>>)> {
+        let Some(summaries) = self.load_local_summaries_from_index(index).await? else {
+            return Ok((None, None));
+        };
+        let skill_usages = make_skill_usages(&summaries);
+        let sessions = combine_session_metadata(summaries, metadata);
+        let local_usage = make_local_usage(sessions.clone(), now).map(|mut usage| {
+            usage.skill_usages = skill_usages;
+            usage
+        });
+        Ok((local_usage, Some(sessions)))
+    }
+
     async fn load_local_summaries_internal(
         &self,
         data_root: impl AsRef<Path>,
     ) -> anyhow::Result<Option<Vec<CodexTranscriptSummary>>> {
-        let data_root = data_root.as_ref();
-        if !tokio::fs::try_exists(data_root).await.unwrap_or(false) {
+        let index = index_codex_rollout_files(data_root.as_ref()).await;
+        self.load_local_summaries_from_index(&index).await
+    }
+
+    async fn load_local_summaries_from_index(
+        &self,
+        index: &[CodexRolloutIndexEntry],
+    ) -> anyhow::Result<Option<Vec<CodexTranscriptSummary>>> {
+        if index.is_empty() {
             return Ok(None);
         }
-
-        let archived_dir = data_root.join("archived_sessions");
-        let sessions_dir = data_root.join("sessions");
-
-        let mut files = Vec::new();
-        if tokio::fs::try_exists(&archived_dir).await.unwrap_or(false) {
-            files.extend(enumerate_jsonl_files(&archived_dir).await);
-        }
-        if tokio::fs::try_exists(&sessions_dir).await.unwrap_or(false) {
-            files.extend(enumerate_jsonl_files(&sessions_dir).await);
-        }
-
-        if files.is_empty() {
-            return Ok(None);
-        }
-
-        files.sort();
-        files.dedup();
 
         let mut cache = self.read_cache().await;
-        let live_paths: HashSet<String> = files
+        let live_paths: HashSet<String> = index
             .iter()
-            .map(|f| f.to_string_lossy().to_string())
+            .map(|entry| entry.path.to_string_lossy().to_string())
             .collect();
         cache.entries.retain(|k, _| live_paths.contains(k));
 
         let mut summaries = Vec::new();
-        for file in files {
-            let fingerprint = fingerprint_for(&file).await;
+        for indexed in index {
+            let file = &indexed.path;
+            let fingerprint = indexed.fingerprint.as_ref();
             let key = file.to_string_lossy().to_string();
 
             if let Some(entry) = cache.entries.get(&key) {
-                if let Some(ref fp) = fingerprint {
+                if let Some(fp) = fingerprint {
                     if entry.matches(fp) {
                         summaries.push(entry.summary.clone());
                         continue;
@@ -205,7 +213,7 @@ impl CodexTranscriptReader {
                 }
             }
 
-            let summary = parse_transcript(&file, fingerprint.as_ref()).await;
+            let summary = parse_transcript(file, fingerprint).await;
             if let Some(fp) = fingerprint {
                 cache.entries.insert(
                     key,
@@ -406,14 +414,12 @@ async fn parse_transcript(
         // arguments, prompts, paths, or source contents.
         if envelope_type == Some("response_item") {
             if let Some(payload_type) = codex_string_value(payload.get("type")) {
-                if payload_type == "custom_tool_call" {
+                if payload_type == "function_call" || payload_type == "custom_tool_call" {
                     if let Some(name) = codex_string_value(payload.get("name")) {
                         if !name.is_empty() {
                             *summary.tool_calls.entry(name).or_insert(0) += 1;
                         }
                     }
-                }
-                if payload_type == "function_call" || payload_type == "custom_tool_call" {
                     summary
                         .skill_loads
                         .extend(safe_skill_loads_from_tool_payload(payload, Some(timestamp)));
@@ -927,6 +933,57 @@ mod tests {
         let detailed = usage.detailed_usage.unwrap();
         assert_eq!(detailed.parsed_file_count, 1);
         assert_eq!(detailed.token_event_count, 1);
+    }
+
+    #[tokio::test]
+    async fn aggregates_function_and_custom_tool_calls_without_exposing_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let archived = temp.path().join("archived_sessions");
+        tokio::fs::create_dir_all(&archived).await.unwrap();
+
+        let session = archived.join("rollout-mixed-tools.jsonl");
+        let private_argument = r#"{"cmd":"Get-Content 'C:\\Users\\private-user\\secret.txt'"}"#;
+        let lines = [
+            r#"{"timestamp":"2026-03-26T12:53:47.026Z","type":"session_meta","payload":{"id":"session-mixed","cwd":"h:\\project\\demo","model_provider":"openai"}}"#.to_string(),
+            r#"{"timestamp":"2026-03-26T12:53:47.164Z","type":"event_msg","payload":{"type":"token_count","turn_id":"turn-1","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50,"reasoning_output_tokens":0,"total_tokens":150}}}}"#.to_string(),
+            format!(
+                r#"{{"timestamp":"2026-03-26T12:53:48.000Z","type":"response_item","payload":{{"type":"function_call","name":"read_file","arguments":{}}}}}"#,
+                serde_json::to_string(private_argument).unwrap()
+            ),
+            r#"{"timestamp":"2026-03-26T12:53:49.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call-2","name":"apply_patch","input":"replace private content"}}"#.to_string(),
+            r#"{"timestamp":"2026-03-26T12:53:50.000Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"same tool, second event"}}"#.to_string(),
+        ];
+        tokio::fs::write(&session, lines.join("\n")).await.unwrap();
+
+        let cache = temp.path().join("cache");
+        let reader = CodexTranscriptReader::new(&cache);
+        let usage = reader
+            .load_local_usage(temp.path(), Utc::now())
+            .await
+            .unwrap()
+            .expect("should produce LocalUsage");
+
+        assert_eq!(usage.tool_usages.len(), 2);
+        assert_eq!(
+            usage
+                .tool_usages
+                .iter()
+                .find(|tool| tool.name == "read_file")
+                .map(|tool| tool.call_count),
+            Some(2)
+        );
+        assert_eq!(
+            usage
+                .tool_usages
+                .iter()
+                .find(|tool| tool.name == "apply_patch")
+                .map(|tool| tool.call_count),
+            Some(1)
+        );
+
+        let dashboard_json = serde_json::to_string(&usage).unwrap();
+        assert!(!dashboard_json.contains(private_argument));
+        assert!(!dashboard_json.contains("replace private content"));
     }
 
     #[tokio::test]

@@ -17,6 +17,19 @@ codexU v1.3.0 adds on-device inference performance monitoring to its AI leadersh
 
 codexU is a macOS menu bar and desktop app for tracking OpenAI Codex / ChatGPT Codex and Claude Code quota, token usage, today's tasks, and local AI leadership. It keeps the information you check most in the menu bar and main window, so you can quickly see remaining quota, reset times, daily progress, and how much AI labor one person is directing.
 
+## Windows Release
+
+Starting with v1.3.0, codexU also ships a Windows x86_64 desktop version. The Windows installers are available in the [GitHub v1.3.0 Release](https://github.com/shanggqm/codexU/releases/tag/v1.3.0) in both MSI and NSIS formats:
+
+- `codexU-1.3.0-windows-x86_64.msi`: Windows Installer package.
+- `codexU-1.3.0-windows-x86_64-setup.exe`: NSIS setup wizard.
+- Windows 10/11 x86_64 is supported; Windows ARM64 is not packaged yet.
+- Verification note: this Windows V0 native visual matrix and shell-lifecycle evidence was collected on a host classified as Windows 11 by build `26200`; Windows 10 remains a supported target but was not observed in this run.
+- The Windows version reads local data under `%USERPROFILE%\.codex\` and preserves the local-first privacy boundary. It does not upload usage, threads, paths, logs, or account data.
+- The Windows version currently supports Codex only; Claude Code is not supported yet.
+
+The Windows version is an independent Tauri desktop implementation. The public Windows installers are not code-signed by the repository's default workflow, so Windows may show a security prompt on first launch. Windows and macOS continue to evolve as separate implementations, so their feature coverage is not yet identical.
+
 ![codexU v1.1.0 palette gallery, settings, and main window](docs/screenshot-v1.1.0-palette-gallery.png)
 
 ## Who It Is For
@@ -103,6 +116,15 @@ Download the DMG for your Mac architecture from GitHub Releases:
 
 After installation, codexU checks GitHub Releases for new versions at most once per day by default, including beta releases. The check reads public release metadata only. When an update is available, codexU opens the browser to download the DMG or view the Release page; installation remains manual. You can turn off automatic checks or run a manual check from the System section in Settings.
 
+### Windows
+
+Download a Windows x86_64 installer from the [latest GitHub Release](https://github.com/shanggqm/codexU/releases/latest):
+
+- MSI: `codexU-<version>-windows-x86_64.msi`
+- NSIS: `codexU-<version>-windows-x86_64-setup.exe`
+
+Run the installer and follow its setup wizard. Each installer has a matching `.sha256` checksum file; see [DISTRIBUTION.md](DISTRIBUTION.md) for build, verification, and current release limitations.
+
 ## Requirements
 
 - macOS 13 or later.
@@ -111,6 +133,12 @@ After installation, codexU checks GitHub Releases for new versions at most once 
 - Codex must have been used at least once so `~/.codex/state_5.sqlite` exists.
 - Claude Code support is optional. Historical tokens come from `~/.claude/projects/**/*.jsonl`; quota requires a local statusLine snapshot cache.
 - Xcode Command Line Tools for building from source.
+
+### Windows
+
+- Windows 10 or later (x86_64).
+- Codex installed locally, with local data generated under `%USERPROFILE%\.codex\`.
+- The Windows version currently supports Codex only; Windows ARM64 is not currently in the release scope.
 
 ## Build From Source
 
