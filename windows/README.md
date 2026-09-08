@@ -23,6 +23,19 @@ Playwright viewport `1440×900`。画面只展示聚合指标和领导力界面�
 - 标题优先使用 `title`，为空时回退到 `preview`，展示前归一化并截断到 48 个字符
 - 工作区只展示路径尾名，automation 优先使用配置中的 `name`
 
+## 安装（推荐）
+
+Windows 用户可以直接打开[最新 GitHub Release](https://github.com/shanggqm/codexU/releases/latest)，在
+Assets 中下载带有 `-setup.exe` 后缀的 NSIS 安装包：
+
+1. 下载 `codexU-<version>-windows-x86_64-setup.exe`。
+2. 双击安装包并按向导完成安装；它使用当前用户安装，不需要管理员权限。
+3. 从开始菜单或安装目录启动 `codexU`。
+
+Release 页面同时提供 MSI 安装包和对应的 `.sha256` 文件。需要通过 Windows Installer 管理安装时选择 MSI；
+需要快速完成当前用户安装时，优先选择 NSIS 安装包。仓库默认发布包尚未进行代码签名，Windows 首次运行时
+可能显示安全提示。
+
 ## 快速开始
 
 Windows 工作区使用 Node.js 22.12 或更新版本和 MSVC ABI。首次在当前检出目录开发时，

@@ -19,6 +19,9 @@ const MONTHLY_MAX_DURATION_MINS: i64 = 31 * 24 * 60;
 const APP_SERVER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const APP_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Official rate-limit data read from the local Codex app-server.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexAppServerQuotaSnapshot {
@@ -270,15 +273,26 @@ fn selected_rate_limits(response: &Value) -> Option<&Value> {
 fn launch_app_server(port: u16) -> anyhow::Result<Child> {
     let executable = resolve_codex_executable()
         .ok_or_else(|| anyhow::anyhow!("Could not locate the installed Codex CLI executable"))?;
-    Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["app-server", "--listen", &format!("ws://127.0.0.1:{port}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    configure_no_console(&mut command);
+    command
         .spawn()
         .map_err(|_| anyhow::anyhow!("Could not launch the installed Codex CLI"))
 }
+
+#[cfg(windows)]
+fn configure_no_console(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_no_console(_command: &mut Command) {}
 
 fn resolve_codex_executable() -> Option<PathBuf> {
     let app_data = env::var_os("APPDATA")?;
@@ -329,6 +343,51 @@ async fn stop_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.start_kill();
         let _ = timeout(Duration::from_secs(1), child.wait()).await;
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_server_child_creation_disables_a_console() {
+        let script = r#"
+$signature = @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+'@
+Add-Type -MemberDefinition $signature -Name NativeMethods -Namespace CodexU.ConsoleProbe
+[CodexU.ConsoleProbe.NativeMethods]::GetConsoleWindow().ToInt64()
+"#;
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_no_console(&mut command);
+
+        let output = command
+            .output()
+            .await
+            .expect("PowerShell console probe should start");
+        assert!(
+            output.status.success(),
+            "PowerShell console probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "0",
+            "CREATE_NO_WINDOW must leave the child without a console"
+        );
     }
 }
 

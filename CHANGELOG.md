@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.3.1 - 2026-09-01
+
+- 完成独立 Windows x86_64 Tauri Dashboard V0：Overview、Tasks、AI Leadership、Usage、Inference、Projects、Skills 和 Settings 八个 Web surface 统一接入本地数据管线。
+- Windows app-server 子进程启动使用 `CREATE_NO_WINDOW`，首次打开或点击 Refresh 时不再弹出 CMD/命令行窗口，同时保留额度读取、loopback 请求和子进程清理行为。
+- Windows 版本继续保持本地优先和隐私边界，只读取本机 Codex transcript、SQLite 与 automation 元数据；不上传 usage、线程、路径、日志或账户数据。
+- 推理性能聚合补齐本地统计时区、DST 边界、有界流式读取、指纹缓存和共享刷新索引；缺失或非法事件不伪造成有效样本。
+- 固化 Windows glass surface、Playwright 合同/fixture、native exact-HWND 采集边界、shell lifecycle 检查和 MSI/NSIS 发布脚本校验。
+
 ## 1.3.0 - 2026-08-04
 
 - 新增本机推理性能监测：从最近 28 天 Codex rollout 识别完整模型调用，按模型与推理强度展示平均耗时、P50、P90、有效吞吐和 reasoning token 占比，并支持今日、7 日均和 28 日均视图。
